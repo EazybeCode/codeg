@@ -111,7 +111,7 @@ it("gives each provider a compact row: mark, name, status, and only its own acti
     /neev-ok/
   )
   expect(
-    within(codex).getByRole("button", { name: "Connect codex" })
+    within(codex).getByRole("button", { name: "Sign in with ChatGPT" })
   ).toBeEnabled()
   expect(
     within(codex).queryByRole("button", { name: /Disconnect|Test/ })
@@ -190,13 +190,15 @@ it("opens the sign-in under the row being signed in to, with one action and a sm
   const user = userEvent.setup()
   mount()
   const codex = await rowOf("Codex")
-  await user.click(within(codex).getByRole("button", { name: "Connect codex" }))
+  await user.click(
+    within(codex).getByRole("button", { name: "Sign in with ChatGPT" })
+  )
 
   const panel = await within(codex).findByRole("group", {
     name: "Sign in to Codex",
   })
   // What the next step needs, and nothing competing with it.
-  expect(within(panel).getByText("ABCD-EFGH")).toBeVisible()
+  expect(await within(panel).findByText("ABCD-EFGH")).toBeVisible()
   expect(within(panel).getByRole("button", { name: "Copy code" })).toBeVisible()
   expect(
     within(panel).getByRole("link", { name: "Open the sign-in page" })
@@ -204,7 +206,7 @@ it("opens the sign-in under the row being signed in to, with one action and a sm
   expect(within(panel).getByText("Expires")).toBeVisible()
   // The row's own action area steps aside; Cancel lives in the panel.
   expect(
-    within(codex).queryByRole("button", { name: "Connect codex" })
+    within(codex).queryByRole("button", { name: "Sign in with ChatGPT" })
   ).toBeNull()
   expect(within(codex).getByText("Waiting for sign-in…")).toBeVisible()
   // Only this row opened.
@@ -225,7 +227,7 @@ it("opens the sign-in under the row being signed in to, with one action and a sm
     ).toBeNull()
   )
   expect(
-    await within(codex).findByRole("button", { name: "Connect codex" })
+    await within(codex).findByRole("button", { name: "Sign in with ChatGPT" })
   ).toBeEnabled()
 })
 
@@ -252,7 +254,7 @@ it("says the sign-in is being prepared before the provider has answered", async 
   const user = userEvent.setup()
   mount()
   await user.click(
-    await screen.findByRole("button", { name: "Connect claude" })
+    await screen.findByRole("button", { name: "Sign in with Claude" })
   )
   const panel = await screen.findByRole("group", { name: "Sign in to Claude" })
   expect(within(panel).getByText("Preparing sign-in…")).toBeVisible()
@@ -274,16 +276,20 @@ it("reaches every action by keyboard, refresh first", async () => {
   })
   const user = userEvent.setup()
   mount()
-  await screen.findByRole("button", { name: "Connect codex" })
+  await screen.findByRole("button", { name: "Sign in with ChatGPT" })
   const order: (string | null)[] = []
   for (let step = 0; step < 4; step += 1) {
     await user.tab()
-    order.push(document.activeElement?.getAttribute("aria-label") ?? null)
+    // The accessible name: an explicit label, else the visible text.
+    const active = document.activeElement
+    order.push(
+      active?.getAttribute("aria-label") ?? active?.textContent ?? null
+    )
   }
   expect(order).toEqual([
     "Refresh status",
     "Test the claude connection",
     "Disconnect claude",
-    "Connect codex",
+    "Sign in with ChatGPT",
   ])
 })

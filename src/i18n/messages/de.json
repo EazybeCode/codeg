@@ -258,6 +258,8 @@
     "agentPostsToTeam": "Deine Frage und die Antwort des Agenten werden beide in diesem Gespräch gepostet.",
     "agentAuthored": "Agent · gefragt von {name}",
     "connectProvider": "Verbinden",
+    "signInWithClaude": "Mit Claude anmelden",
+    "signInWithChatGPT": "Mit ChatGPT anmelden",
     "reconnectProvider": "Neu verbinden",
     "disconnectProvider": "Trennen",
     "cancelSignIn": "Anmeldung abbrechen",

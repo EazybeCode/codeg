@@ -416,6 +416,24 @@ export function NativeAgentConnectionsPanel({
       pendingKeys.current.delete(provider)
   }
 
+  /**
+   * The flow every NEW hosted Claude/Codex sign-in starts (Oct 6).
+   *
+   * The CLI's own browser login redirects to ITS loopback listener, which runs
+   * on the server; the user's browser would land on its own localhost — a dead
+   * end unless an extension relays it. So hosted sign-in never starts it, with
+   * or without the extension, and starts the provider's documented remote
+   * flow instead: Codex's ChatGPT device code (a short code at
+   * auth.openai.com) and Claude's paste-a-code (the provider page shows the
+   * code; the server reads an absent method as that flow). A browser sign-in
+   * already in flight from an older page still finishes (`CallbackApprovalPrompt`).
+   */
+  function defaultMethod(
+    provider: NeevAgentProvider
+  ): NeevConnectMethod | undefined {
+    return provider === "codex" ? "device" : undefined
+  }
+
   /** Start a sign-in. The caller owns `busy` and the error reporting. */
   async function beginSignIn(
     provider: NeevAgentProvider,
@@ -431,10 +449,7 @@ export function NativeAgentConnectionsPanel({
       connectKey,
       auth.session.csrf,
       auth.signal,
-      // Claude and Codex sign in through the CLI's own browser login first;
-      // the server reads an absent method as the legacy flow.
-      method ??
-        (provider === "claude" || provider === "codex" ? "browser" : undefined)
+      method ?? defaultMethod(provider)
     )
     if (started.outcome === "pending")
       remember({
@@ -1052,14 +1067,21 @@ export function NativeAgentConnectionsPanel({
           <Button
             size="sm"
             disabled={working || otherSignIn}
-            aria-label={named(
-              reconnecting ? "reconnectProvider" : "connectProvider"
-            )}
+            // A first Claude/Codex sign-in says WHOSE account signs in — the
+            // way the providers name it — and that label is the accessible
+            // name too. Reconnect (a teardown first) keeps its own verb.
+            aria-label={
+              !reconnecting && signInLabel(provider)
+                ? undefined
+                : named(reconnecting ? "reconnectProvider" : "connectProvider")
+            }
             onClick={() =>
               void (reconnecting ? reconnect(provider) : connect(provider))
             }
           >
-            {t(reconnecting ? "reconnectProvider" : "connectProvider")}
+            {!reconnecting && signInLabel(provider)
+              ? t(signInLabel(provider)!)
+              : t(reconnecting ? "reconnectProvider" : "connectProvider")}
           </Button>
         )}
         {connection.state !== "not_signed_in" && disconnectButton}
@@ -1276,6 +1298,15 @@ function PasteCodeForm({
  * cannot connect, so the paste box for that address is shown up front. With it,
  * every fallback waits behind one disclosure rather than crowding the prompt.
  */
+/** The provider-named sign-in label, for the subscriptions that have one. */
+function signInLabel(
+  provider: NeevAgentProvider
+): "signInWithClaude" | "signInWithChatGPT" | null {
+  if (provider === "claude") return "signInWithClaude"
+  if (provider === "codex") return "signInWithChatGPT"
+  return null
+}
+
 type CallbackIssue = "rejected" | "gone" | "limited" | "unavailable"
 
 const CALLBACK_ISSUE_KEYS = {

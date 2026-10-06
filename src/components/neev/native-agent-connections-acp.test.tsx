@@ -76,7 +76,7 @@ it("offers no ACP provider the server does not list", async () => {
   })
   mount()
   expect(
-    await screen.findByRole("button", { name: "Connect claude" })
+    await screen.findByRole("button", { name: "Sign in with Claude" })
   ).toBeVisible()
   for (const name of ["Cursor", "Gemini CLI", "OpenCode"])
     expect(screen.queryByText(name)).toBeNull()

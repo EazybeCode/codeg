@@ -258,6 +258,8 @@
     "agentPostsToTeam": "Votre question et la réponse de l'agent sont toutes deux publiées dans cette conversation.",
     "agentAuthored": "agent · demandé par {name}",
     "connectProvider": "Se connecter",
+    "signInWithClaude": "Se connecter avec Claude",
+    "signInWithChatGPT": "Se connecter avec ChatGPT",
     "reconnectProvider": "Se reconnecter",
     "disconnectProvider": "Se déconnecter",
     "cancelSignIn": "Annuler la connexion",

@@ -258,6 +258,8 @@
     "agentPostsToTeam": "يتم نشر سؤالك ورد الوكيل كليهما في هذه المحادثة.",
     "agentAuthored": "وكيل · سأله {name}",
     "connectProvider": "اتصال",
+    "signInWithClaude": "تسجيل الدخول باستخدام Claude",
+    "signInWithChatGPT": "تسجيل الدخول باستخدام ChatGPT",
     "reconnectProvider": "إعادة الاتصال",
     "disconnectProvider": "قطع الاتصال",
     "cancelSignIn": "إلغاء تسجيل الدخول",

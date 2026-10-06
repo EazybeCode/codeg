@@ -258,6 +258,8 @@
     "agentPostsToTeam": "你的提问和智能体的回复都会发布到此对话中。",
     "agentAuthored": "智能体 · 由 {name} 提问",
     "connectProvider": "连接",
+    "signInWithClaude": "使用 Claude 登录",
+    "signInWithChatGPT": "使用 ChatGPT 登录",
     "reconnectProvider": "重新连接",
     "disconnectProvider": "断开连接",
     "cancelSignIn": "取消登录",

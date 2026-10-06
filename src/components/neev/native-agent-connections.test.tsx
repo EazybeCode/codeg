@@ -97,18 +97,17 @@ it("waits for the sign-in it started instead of claiming it connected", async ()
   const user = userEvent.setup()
   mount()
   await user.click(
-    await screen.findByRole("button", { name: "Connect claude" })
+    await screen.findByRole("button", { name: "Sign in with Claude" })
   )
   // A pending attempt is "waiting", never "Connected", and can be cancelled.
   expect(await screen.findByText("Waiting for sign-in…")).toBeVisible()
   expect(
     screen.getByRole("button", { name: "Cancel claude sign-in" })
   ).toBeEnabled()
-  // Claude signs in through the CLI's own browser login, asked for by name.
-  expect(bodies[0]).toEqual({
-    requestKey: expect.any(String),
-    method: "browser",
-  })
+  // No sign-in extension here: Claude starts its paste-a-code flow (the
+  // absent method), never the loopback browser login that would send this
+  // browser to its own localhost.
+  expect(bodies[0]).toEqual({ requestKey: expect.any(String) })
   // Only the server flipping the connection makes it read Connected.
   expect(await screen.findByText("Connected")).toBeVisible()
   expect(polls).toBeGreaterThanOrEqual(3)
@@ -134,7 +133,7 @@ it("reports an attempt that lapses rather than leaving it spinning", async () =>
   const user = userEvent.setup()
   mount()
   await user.click(
-    await screen.findByRole("button", { name: "Connect claude" })
+    await screen.findByRole("button", { name: "Sign in with Claude" })
   )
   expect(
     await screen.findByText("Sign-in expired before it completed.")
@@ -169,7 +168,7 @@ it("cancels an in-flight sign-in with the attempt it is actually waiting on", as
   const user = userEvent.setup()
   mount()
   await user.click(
-    await screen.findByRole("button", { name: "Connect claude" })
+    await screen.findByRole("button", { name: "Sign in with Claude" })
   )
   await user.click(
     await screen.findByRole("button", { name: "Cancel claude sign-in" })
@@ -207,10 +206,10 @@ it("replays one request key so a retried connect cannot start two sign-ins", asy
   const user = userEvent.setup()
   mount()
   await user.click(
-    await screen.findByRole("button", { name: "Connect claude" })
+    await screen.findByRole("button", { name: "Sign in with Claude" })
   )
   expect(await screen.findByRole("alert")).toBeVisible()
-  await user.click(screen.getByRole("button", { name: "Connect claude" }))
+  await user.click(screen.getByRole("button", { name: "Sign in with Claude" }))
   await waitFor(() => expect(keys).toHaveLength(2))
   // The same key means the server returns the SAME attempt.
   expect(keys[0]).toBe(keys[1])
@@ -254,7 +253,9 @@ it("retires a connect key the server has told us is spent", async () => {
   const user = userEvent.setup()
   mount()
   const connect = async () =>
-    user.click(await screen.findByRole("button", { name: "Connect claude" }))
+    user.click(
+      await screen.findByRole("button", { name: "Sign in with Claude" })
+    )
   await connect()
   expect(await screen.findByRole("alert")).toBeVisible()
   // The 503 may have come from a gateway AFTER the backend admitted the request, so
@@ -301,10 +302,12 @@ it("keeps the connect key when a gateway answers for the backend", async () => {
     const user = userEvent.setup()
     mount()
     await user.click(
-      await screen.findByRole("button", { name: "Connect claude" })
+      await screen.findByRole("button", { name: "Sign in with Claude" })
     )
     expect(await screen.findByRole("alert")).toBeVisible()
-    await user.click(screen.getByRole("button", { name: "Connect claude" }))
+    await user.click(
+      screen.getByRole("button", { name: "Sign in with Claude" })
+    )
     await waitFor(() => expect(keys).toHaveLength(2))
     expect(keys[1]).toBe(keys[0])
     cleanup()
@@ -416,7 +419,7 @@ it("offers no check for a connection that does not exist yet", async () => {
     "GET /api/neev/agent/connections": () => json(wiring("not_signed_in")),
   })
   mount()
-  await screen.findByRole("button", { name: "Connect claude" })
+  await screen.findByRole("button", { name: "Sign in with Claude" })
   // There is nothing to check before a sign-in.
   expect(
     screen.queryByRole("button", { name: "Test the claude connection" })
@@ -432,7 +435,7 @@ it("surfaces a sign-in already in flight rather than queueing another", async ()
   const user = userEvent.setup()
   mount()
   await user.click(
-    await screen.findByRole("button", { name: "Connect claude" })
+    await screen.findByRole("button", { name: "Sign in with Claude" })
   )
   expect(await screen.findByRole("alert")).toBeVisible()
   expect(screen.queryByText("Waiting for sign-in…")).toBeNull()
@@ -498,7 +501,7 @@ it("discards a stored attempt that has already lapsed", async () => {
   mount()
   // Nothing to watch: it offers a fresh Connect and never polls the dead id.
   expect(
-    await screen.findByRole("button", { name: "Connect claude" })
+    await screen.findByRole("button", { name: "Sign in with Claude" })
   ).toBeEnabled()
   expect(polls).toBe(0)
   expect(localStorage.getItem(STORAGE_KEY)).toBeNull()
@@ -529,7 +532,7 @@ it("stops polling once the attempt's own deadline passes", async () => {
   const user = userEvent.setup()
   mount()
   await user.click(
-    await screen.findByRole("button", { name: "Connect claude" })
+    await screen.findByRole("button", { name: "Sign in with Claude" })
   )
   expect(
     await screen.findByText("Sign-in expired before it completed.")
@@ -564,7 +567,7 @@ it("skips polling while the tab is hidden and resumes when it returns", async ()
   const user = userEvent.setup()
   mount()
   await user.click(
-    await screen.findByRole("button", { name: "Connect claude" })
+    await screen.findByRole("button", { name: "Sign in with Claude" })
   )
   await screen.findByText("Waiting for sign-in…")
   await new Promise((resolve) => setTimeout(resolve, 40))
@@ -596,7 +599,7 @@ it("rides out a transient poll failure and then stops without a verdict", async 
   const user = userEvent.setup()
   mount()
   await user.click(
-    await screen.findByRole("button", { name: "Connect claude" })
+    await screen.findByRole("button", { name: "Sign in with Claude" })
   )
   // One blip must not abandon a live sign-in, but a dead endpoint must not be
   // hammered forever either.
@@ -628,10 +631,12 @@ it("names the provider on every action so two rows are distinguishable", async (
   // Identical verbs on two rows would otherwise be ambiguous to a screen
   // reader and to keyboard navigation.
   expect(
-    await screen.findByRole("button", { name: "Connect claude" })
+    await screen.findByRole("button", { name: "Sign in with Claude" })
   ).toBeEnabled()
   expect(screen.getByRole("button", { name: "Disconnect codex" })).toBeEnabled()
-  expect(screen.queryByRole("button", { name: "Connect codex" })).toBeNull()
+  expect(
+    screen.queryByRole("button", { name: "Sign in with ChatGPT" })
+  ).toBeNull()
 })
 
 const DEVICE_APPROVAL = {
@@ -687,7 +692,9 @@ it("shows a device code and the page to approve it on", async () => {
   })
   const user = userEvent.setup()
   mount()
-  await user.click(await screen.findByRole("button", { name: "Connect codex" }))
+  await user.click(
+    await screen.findByRole("button", { name: "Sign in with ChatGPT" })
+  )
   expect(await screen.findByText("ABCD-EFGH")).toBeVisible()
   const link = screen.getByRole("link", { name: "Open the sign-in page" })
   expect(link).toHaveAttribute("href", "https://auth.openai.com/codex/device")
@@ -720,7 +727,7 @@ it("takes a pasted authorization code and forwards it without keeping it", async
   const user = userEvent.setup()
   mount()
   await user.click(
-    await screen.findByRole("button", { name: "Connect claude" })
+    await screen.findByRole("button", { name: "Sign in with Claude" })
   )
   const field = await screen.findByRole("textbox", {
     name: "Paste the authorization code",
@@ -749,7 +756,7 @@ it("surfaces a rejected code submission and keeps the prompt usable", async () =
   const user = userEvent.setup()
   mount()
   await user.click(
-    await screen.findByRole("button", { name: "Connect claude" })
+    await screen.findByRole("button", { name: "Sign in with Claude" })
   )
   await user.type(
     await screen.findByRole("textbox", {
@@ -776,7 +783,9 @@ it("shows no approval prompt until the server has produced one", async () => {
   })
   const user = userEvent.setup()
   mount()
-  await user.click(await screen.findByRole("button", { name: "Connect codex" }))
+  await user.click(
+    await screen.findByRole("button", { name: "Sign in with ChatGPT" })
+  )
   await screen.findByText("Waiting for sign-in…")
   // Nothing invented while the supervisor has not spoken.
   expect(
@@ -903,7 +912,9 @@ it("offers a way out of a sign-in this browser never started", async () => {
   })
   // Nothing else: there is no connection yet to test, and a second sign-in
   // over a live one is not a recovery.
-  expect(screen.queryByRole("button", { name: "Connect claude" })).toBeNull()
+  expect(
+    screen.queryByRole("button", { name: "Sign in with Claude" })
+  ).toBeNull()
   expect(screen.queryByRole("button", { name: "Reconnect claude" })).toBeNull()
   expect(
     screen.queryByRole("button", { name: "Test claude connection" })
@@ -953,7 +964,7 @@ it("will not start a second provider's sign-in over a live one", async () => {
   mount()
 
   expect(await screen.findByText("Waiting for sign-in\u2026")).toBeVisible()
-  const codex = screen.getByRole("button", { name: "Connect codex" })
+  const codex = screen.getByRole("button", { name: "Sign in with ChatGPT" })
   expect(codex).toBeDisabled()
   // Even if the click lands anyway, nothing is sent and the attempt stands.
   await user.click(codex)
@@ -993,7 +1004,7 @@ it("stops asking for a code once the server has taken one", async () => {
   const user = userEvent.setup()
   mount()
   await user.click(
-    await screen.findByRole("button", { name: "Connect claude" })
+    await screen.findByRole("button", { name: "Sign in with Claude" })
   )
   await user.type(
     await screen.findByRole("textbox", {
@@ -1123,7 +1134,7 @@ it("does not show the Codex prerequisite on another provider, or once connected"
       }),
   })
   mount()
-  await screen.findByRole("button", { name: "Connect claude" })
+  await screen.findByRole("button", { name: "Sign in with Claude" })
   expect(
     screen.queryByText(
       "Codex needs device code authorization turned on in ChatGPT, under Settings → Security."
@@ -1156,7 +1167,9 @@ async function showDeviceCode(user: ReturnType<typeof userEvent.setup>) {
       }),
   })
   mount()
-  await user.click(await screen.findByRole("button", { name: "Connect codex" }))
+  await user.click(
+    await screen.findByRole("button", { name: "Sign in with ChatGPT" })
+  )
   await screen.findByText("ABCD-EFGH")
 }
 

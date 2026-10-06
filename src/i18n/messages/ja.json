@@ -258,6 +258,8 @@
     "agentPostsToTeam": "あなたの質問とエージェントの返信は、どちらもこの会話に投稿されます。",
     "agentAuthored": "エージェント · {name} が質問",
     "connectProvider": "接続",
+    "signInWithClaude": "Claude でサインイン",
+    "signInWithChatGPT": "ChatGPT でサインイン",
     "reconnectProvider": "再接続",
     "disconnectProvider": "接続を解除",
     "cancelSignIn": "サインインをキャンセル",

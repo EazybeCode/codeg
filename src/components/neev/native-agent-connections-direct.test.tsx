@@ -1,6 +1,10 @@
 // @vitest-environment-options {"url": "https://app.neev.so/settings"}
 //
-// Claude and Codex sign in through the CLI's own browser login first
+// Since Oct 6 a NEW hosted Claude/Codex sign-in never starts the CLI's
+// browser (loopback) login: it would send the user's browser to its own
+// localhost. These tests pin both halves — new sign-ins start the providers'
+// documented remote flows, with or without the extension — and that a browser
+// sign-in already in flight from an older page still finishes
 // (`direct-signin-ui-contract-v2.md`). What these pin: one primary action; the
 // extension — found through its page bridge, run for real — opens the page
 // itself; fallbacks tucked away while the browser can come back by itself and
@@ -130,7 +134,9 @@ function signIn(
 }
 
 async function startCodex(user: ReturnType<typeof userEvent.setup>) {
-  await user.click(await screen.findByRole("button", { name: "Connect codex" }))
+  await user.click(
+    await screen.findByRole("button", { name: "Sign in with ChatGPT" })
+  )
 }
 
 async function pasteAddress(
@@ -148,6 +154,24 @@ async function pasteAddress(
 }
 
 let extension: ReturnType<typeof installSigninExtension> | null = null
+
+/**
+ * A browser sign-in started by an older page, picked back up from storage —
+ * the only way the browser-callback prompt still appears.
+ */
+function resumeBrowser(provider: "codex" | "claude") {
+  localStorage.setItem(
+    "neev.agent.attempt.1:3",
+    JSON.stringify({
+      provider,
+      attemptId: ATTEMPT_ID,
+      expiresAt: FAR_FUTURE,
+      cancelKey: "cancel-key-1",
+      connectKey: "connect-key-1",
+    })
+  )
+}
+
 beforeEach(() => installBrowserPostMessage())
 afterEach(() => {
   extension?.reset()
@@ -163,19 +187,16 @@ it("finds the extension by its bridge and lets it open the page — fallbacks st
   vi.stubGlobal("open", open)
   const { state, posted } = signIn("codex", CODEX_CALLBACK)
   const user = userEvent.setup()
+  resumeBrowser("codex")
   mount()
-  await startCodex(user)
   const go = await screen.findByRole("button", { name: "Continue in browser" })
   await waitFor(() => expect(go).toBeEnabled())
   expect(
     screen.getByText("Browser didn't come back?").closest("details")
   ).not.toHaveAttribute("open")
   expect(screen.queryByText(/isn't answering here/)).toBeNull()
-  // Asked for by name: the server reads an absent method as the legacy flow.
-  expect(posted[0].body).toEqual({
-    requestKey: expect.any(String),
-    method: "browser",
-  })
+  // Resumed, not started: nothing new was asked of the server.
+  expect(posted.filter((call) => call.url === "connect")).toEqual([])
 
   await user.click(go)
   // The extension's real relay accepted the arm and opened the tab itself.
@@ -210,8 +231,8 @@ it("opens the page itself, with a backup link, when the extension armed but did 
   vi.stubGlobal("open", open)
   signIn("codex", CODEX_CALLBACK)
   const user = userEvent.setup()
+  resumeBrowser("codex")
   mount()
-  await startCodex(user)
   const go = await screen.findByRole("button", { name: "Continue in browser" })
   await waitFor(() => expect(go).toBeEnabled())
   await user.click(go)
@@ -237,8 +258,8 @@ it("treats a refused arm as no relay: opens the page and puts the paste box in f
   vi.stubGlobal("open", open)
   signIn("codex", CODEX_CALLBACK)
   const user = userEvent.setup()
+  resumeBrowser("codex")
   mount()
-  await startCodex(user)
   const go = await screen.findByRole("button", { name: "Continue in browser" })
   await waitFor(() => expect(go).toBeEnabled())
   await user.click(go)
@@ -253,13 +274,13 @@ it("treats a refused arm as no relay: opens the page and puts the paste box in f
   ).toHaveAttribute("open")
 })
 
-it("with no extension, opens the page in the click and puts the paste box up front", async () => {
+it("with no extension, a resumed browser sign-in opens the page in the click and puts the paste box up front", async () => {
   const open = vi.fn()
   vi.stubGlobal("open", open)
   const { state, callbacks } = signIn("codex", CODEX_CALLBACK)
   const user = userEvent.setup()
+  resumeBrowser("codex")
   mount()
-  await startCodex(user)
   expect(
     await screen.findByText(/isn't answering here/, {}, DISCOVERY)
   ).toBeVisible()
@@ -310,8 +331,8 @@ it("says each refusal the way the contract does, and keeps the sign-in alive", a
     () => json({ code: "limited" }, 429),
   ])
   const user = userEvent.setup()
+  resumeBrowser("codex")
   mount()
-  await startCodex(user)
   const address = `http://127.0.0.1:1455/auth/callback?code=ac_1&state=${STATE}`
   for (const text of [
     "That address didn't match this sign-in. Copy it again, or start again.",
@@ -334,8 +355,8 @@ it("retries an unreachable delivery under the SAME request key", async () => {
     () => json({ code: "unavailable" }, 503),
   ])
   const user = userEvent.setup()
+  resumeBrowser("codex")
   mount()
-  await startCodex(user)
   await pasteAddress(
     user,
     `http://localhost:1455/auth/callback?code=ac_1&state=${STATE}`
@@ -361,8 +382,8 @@ it("reads a 409 as 'already delivered': no error, the poll settles it", async ()
     },
   ])
   const user = userEvent.setup()
+  resumeBrowser("codex")
   mount()
-  await startCodex(user)
   await pasteAddress(
     user,
     `http://localhost:1455/auth/callback?code=ac_1&state=${STATE}`
@@ -382,8 +403,8 @@ it("says a declined sign-in was cancelled", async () => {
     },
   ])
   const user = userEvent.setup()
+  resumeBrowser("codex")
   mount()
-  await startCodex(user)
   await pasteAddress(
     user,
     `http://localhost:1455/auth/callback?error=access_denied&state=${STATE}`
@@ -430,12 +451,12 @@ it("lets Codex fall back to a device code by cancelling and starting again", asy
       }),
   })
   const user = userEvent.setup()
+  resumeBrowser("codex")
   mount()
-  await startCodex(user)
   await user.click(await screen.findByText("Browser didn't come back?"))
   await user.click(screen.getByRole("button", { name: "Use a code instead" }))
   expect(await screen.findByText("WXYZ-12345")).toBeVisible()
-  expect(order).toEqual(["connect:browser", "cancel", "connect:device"])
+  expect(order).toEqual(["cancel", "connect:device"])
 })
 
 it("offers Claude today's paste-a-code page as the secondary path", async () => {
@@ -463,10 +484,8 @@ it("offers Claude today's paste-a-code page as the secondary path", async () => 
     },
   })
   const user = userEvent.setup()
+  resumeBrowser("claude")
   mount()
-  await user.click(
-    await screen.findByRole("button", { name: "Connect claude" })
-  )
   const details = (
     await screen.findByText("Browser didn't come back?")
   ).closest("details")!
@@ -492,15 +511,93 @@ it("offers Claude today's paste-a-code page as the secondary path", async () => 
   await waitFor(() => expect(submitted).toEqual([{ code: "ac_paste" }]))
 })
 
-it("does not ask for device-code setup over a browser sign-in", async () => {
+it("does not ask for device-code setup over a resumed browser sign-in", async () => {
   vi.stubGlobal("open", vi.fn())
   signIn("codex", CODEX_CALLBACK)
-  const user = userEvent.setup()
+  resumeBrowser("codex")
   mount()
-  expect(
-    await screen.findByText(/needs device code authorization/)
-  ).toBeVisible()
-  await startCodex(user)
   await screen.findByRole("button", { name: "Continue in browser" })
   expect(screen.queryByText(/needs device code authorization/)).toBeNull()
+})
+
+// Oct 6: NEW hosted sign-ins start the providers' documented remote flows —
+// never the loopback login — whether or not the extension is installed.
+const DEVICE = {
+  kind: "device",
+  verificationUrl: "https://auth.openai.com/codex/device",
+  userCode: "WXYZ-12345",
+  needsCode: false,
+}
+const CODE = {
+  kind: "authorizationCode",
+  verificationUrl: "https://claude.com/cai/oauth/authorize?code=true&x=1",
+  userCode: null,
+  needsCode: true,
+}
+const PASTE_ADDRESS =
+  "Paste the address from the tab that says it can't connect"
+
+for (const withExtension of [false, true]) {
+  const label = withExtension ? "with the extension" : "with no extension"
+
+  it(`${label}, Sign in with ChatGPT starts the device code and never touches localhost`, async () => {
+    if (withExtension) extension = installSigninExtension()
+    const open = vi.fn()
+    vi.stubGlobal("open", open)
+    const { posted } = signIn("codex", DEVICE)
+    const user = userEvent.setup()
+    mount()
+    await startCodex(user)
+    expect(await screen.findByText("WXYZ-12345")).toBeVisible()
+    expect(posted[0].body).toEqual({
+      requestKey: expect.any(String),
+      method: "device",
+    })
+    expect(screen.queryByRole("textbox", { name: PASTE_ADDRESS })).toBeNull()
+    expect(
+      screen.queryByRole("button", { name: "Continue in browser" })
+    ).toBeNull()
+    expect(open).not.toHaveBeenCalled()
+    if (extension) expect(extension.rules.size).toBe(0)
+  })
+
+  it(`${label}, Sign in with Claude starts paste-a-code (the provider page shows the code)`, async () => {
+    if (withExtension) extension = installSigninExtension()
+    vi.stubGlobal("open", vi.fn())
+    const { posted } = signIn("claude", CODE)
+    const user = userEvent.setup()
+    mount()
+    await user.click(
+      await screen.findByRole("button", { name: "Sign in with Claude" })
+    )
+    expect(
+      await screen.findByRole("textbox", {
+        name: "Paste the authorization code",
+      })
+    ).toBeVisible()
+    // The legacy (deployed) Claude code flow is the absent method.
+    expect(posted[0].body).toEqual({ requestKey: expect.any(String) })
+    expect(screen.queryByRole("textbox", { name: PASTE_ADDRESS })).toBeNull()
+    expect(
+      screen.queryByRole("button", { name: "Continue in browser" })
+    ).toBeNull()
+    if (extension) expect(extension.rules.size).toBe(0)
+  })
+}
+
+it("labels the subscription sign-ins by provider, and offers no way to start the loopback login", async () => {
+  signIn("codex", DEVICE)
+  mount()
+  expect(
+    await screen.findByRole("button", { name: "Sign in with ChatGPT" })
+  ).toBeVisible()
+  expect(screen.queryByRole("button", { name: /Connect codex/ })).toBeNull()
+  // The device code's one prerequisite is said beside the button, and stays.
+  expect(screen.getByText(/needs device code authorization/)).toBeVisible()
+  const user = userEvent.setup()
+  await startCodex(user)
+  await screen.findByText("WXYZ-12345")
+  expect(screen.getByText(/needs device code authorization/)).toBeVisible()
+  // From a device-code sign-in there is no switch back to a browser login.
+  expect(screen.queryByRole("button", { name: /browser/i })).toBeNull()
 })

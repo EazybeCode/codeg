@@ -258,6 +258,8 @@
     "agentPostsToTeam": "질문과 에이전트의 답변이 모두 이 대화에 게시됩니다.",
     "agentAuthored": "에이전트 · {name} 님이 질문",
     "connectProvider": "연결",
+    "signInWithClaude": "Claude로 로그인",
+    "signInWithChatGPT": "ChatGPT로 로그인",
     "reconnectProvider": "다시 연결",
     "disconnectProvider": "연결 해제",
     "cancelSignIn": "로그인 취소",

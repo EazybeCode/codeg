@@ -433,7 +433,9 @@ it("shows the caller's real provider connections instead of a static notice", as
   // The row names the provider the way people do, not the way it is keyed.
   expect(screen.getByText("Codex")).toBeVisible()
   // Real per-provider actions, matched to the state the server reports.
-  expect(screen.getByRole("button", { name: "Connect claude" })).toBeEnabled()
+  expect(
+    screen.getByRole("button", { name: "Sign in with Claude" })
+  ).toBeEnabled()
   expect(screen.getByRole("button", { name: "Reconnect codex" })).toBeEnabled()
   // An existing connection can be checked; one that was never signed in cannot.
   expect(
