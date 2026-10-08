@@ -2255,6 +2255,39 @@ mod direct_signin {
         started.json::<Value>()["attemptId"].as_str().unwrap().to_owned()
     }
 
+    /// The method the supervisor was asked to start with.
+    fn started_method(state: &ServerState) -> Option<dto::LoginMethod> {
+        let Supervisor::Scripted(scripted) = state.supervisor.as_ref() else {
+            panic!("scripted supervisor expected");
+        };
+        match &scripted.requests()[0].body {
+            dto::RequestBody::StartLogin(start) => start.method.clone(),
+            _ => panic!("first exchange is not a start"),
+        }
+    }
+
+    /// Hosted sign-in never starts the CLI's loopback login: its redirect lands
+    /// on the USER's localhost, a dead end. A client still sending `browser`
+    /// (a tab or bundle from before Oct 6) gets the provider's remote flow
+    /// instead — the same one a current client asks for — which every UI
+    /// generation already renders.
+    #[tokio::test]
+    async fn a_stale_browser_request_never_starts_a_loopback_login() {
+        for (provider, expected) in [
+            ("codex", Some(dto::LoginMethod::Device)),
+            ("claude", None),
+        ] {
+            let (state, client, _db, _org) = scripted(vec![started()]).await;
+            client
+                .post(&format!("/api/neev/agent/connections/{provider}/connect"))
+                .json(&serde_json::json!({ "requestKey": "stale-browser", "method": "browser" }))
+                .await
+                .assert_status(axum::http::StatusCode::ACCEPTED);
+            assert_eq!(exchanges(&state), vec!["start_login"], "{provider}");
+            assert!(started_method(&state) == expected, "{provider}: loopback login started");
+        }
+    }
+
     fn body(key: &str) -> Value {
         serde_json::json!({ "requestKey": key, "query": format!("code=ac_1&state={STATE}") })
     }
@@ -2271,14 +2304,9 @@ mod direct_signin {
         // Another key (extension + paste race): 409, client re-reads.
         client.post(&url).json(&body("key-bbbb-2")).await.assert_status(axum::http::StatusCode::CONFLICT);
         assert_eq!(exchanges(&state), vec!["start_login", "deliver_callback"]);
-        // The start asked for direct sign-in explicitly.
-        let Supervisor::Scripted(scripted) = state.supervisor.as_ref() else { unreachable!() };
-        match &scripted.requests()[0].body {
-            dto::RequestBody::StartLogin(start) => {
-                assert!(start.method == Some(dto::LoginMethod::Browser))
-            }
-            _ => panic!("first exchange is not a start"),
-        }
+        // The client asked for direct sign-in by name, but hosted sign-in never
+        // starts the loopback login: the supervisor was asked for the device code.
+        assert!(started_method(&state) == Some(dto::LoginMethod::Device));
     }
 
     #[tokio::test]

@@ -2234,8 +2234,9 @@ struct ConnectInput {
     /// mutation: replaying it returns the SAME attempt instead of starting a
     /// second sign-in.
     request_key: String,
-    /// `"browser"` (direct sign-in) or `"device"` (Codex code). Absent keeps
-    /// the pre-direct-sign-in flow, so an older client is unaffected.
+    /// `"device"` (Codex code) or absent (each provider's remote flow).
+    /// `"browser"` is still accepted from older clients but never starts the
+    /// loopback login: it is read as the provider's remote flow (`connect`).
     #[serde(default)]
     method: Option<String>,
 }
@@ -2408,18 +2409,21 @@ pub(super) async fn connect(
         catalog::organization_mutation::<ConnectInput>(&state, request, SESSION_BODY_LIMIT).await?;
     let method = match input.method.as_deref() {
         None => None,
-        Some("browser") => Some(crate::neev::agents::control_dto::LoginMethod::Browser),
+        // Hosted sign-in never starts the CLI's loopback ("browser") login: its
+        // redirect lands on the USER's localhost, a dead end. A client still
+        // asking for it (a tab or bundle from before Oct 6) gets the provider's
+        // remote flow instead — Codex's device code, Claude's paste-a-code (the
+        // absent method) — which every client generation already renders.
+        Some("browser") if provider == Provider::Codex => {
+            Some(crate::neev::agents::control_dto::LoginMethod::Device)
+        }
+        Some("browser") if provider == Provider::Claude => None,
         // The device code is Codex's only; anything else is a client error.
         Some("device") if provider == Provider::Codex => {
             Some(crate::neev::agents::control_dto::LoginMethod::Device)
         }
         Some(_) => return Err(ApiError::Invalid),
     };
-    if method == Some(crate::neev::agents::control_dto::LoginMethod::Browser)
-        && !matches!(provider, Provider::Codex | Provider::Claude)
-    {
-        return Err(ApiError::Invalid);
-    }
     let outcome = intents::begin(&state, &actor, provider, &input.request_key)
         .await
         .map_err(super::agent_error)?;
