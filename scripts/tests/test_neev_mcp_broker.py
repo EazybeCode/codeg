@@ -64,9 +64,21 @@ class FakeMcp(http.server.BaseHTTPRequestHandler):
     lose_reply = {"armed": False}
 
     def do_POST(self):
-        if self.path == "/bad400":
+        if self.path in ("/bad400", "/legacy400"):
             self._body()
             return self._send(400, b"", "text/plain")
+        if self.path == "/github400":
+            # api.githubcopilot.com/mcp/ with a token it cannot parse: 400 on
+            # the POST and on the GET, never 401.
+            FakeMcp.seen.append((self.command, self.path, dict(self.headers)))
+            self._body()
+            return self._send(400, b"Authorization header is badly formatted\n", "text/plain")
+        if self.path == "/invalid_token":
+            FakeMcp.seen.append((self.command, self.path, dict(self.headers)))
+            self._body()
+            return self._send(400, b"", "text/plain", extra={
+                "WWW-Authenticate": 'Bearer error="invalid_token", '
+                                    'error_description="malformed"'})
         if self.path == "/forbidden":
             self._body()
             return self._send(403, b"", "text/plain")
@@ -144,7 +156,10 @@ class FakeMcp(http.server.BaseHTTPRequestHandler):
         return {}
 
     def do_GET(self):
-        if self.path != "/sse":
+        if self.path == "/github400":
+            FakeMcp.seen.append((self.command, self.path, dict(self.headers)))
+            return self._send(400, b"Authorization header is badly formatted\n", "text/plain")
+        if self.path not in ("/sse", "/legacy400"):
             FakeMcp.seen.append((self.command, self.path, dict(self.headers)))
             return self._send(404, b"", "text/plain")
         if not self._auth_ok():
@@ -388,6 +403,44 @@ class RemoteTest(BrokerHarness):
         # but only AFTER trying it (a GET was made).
         self.assertTrue(any(m == "GET" for (m, p, h) in FakeMcp.seen))
         self.assertState(reply, "not_found")
+
+    def test_a_genuine_legacy_server_that_answers_400_still_connects_over_sse(self):
+        self.start([remote("legacy", "/legacy400")])
+        c = self.client("legacy")
+        self.assertIn("result", c.request(init_request()))
+        c.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        tools = c.request({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+        self.assertEqual(len(tools["result"]["tools"]), 2)
+
+    def test_github_style_400_on_post_and_get_is_auth_failed_not_protocol_error(self):
+        self.start([remote("github", "/github400", token="not-a-github-token")])
+        reply = self.client("github").request(init_request())
+        self.assertState(reply, "auth_failed")
+        self.assertEqual(reply["error"]["data"]["httpStatus"], 400)
+        self.assertIn("400", reply["error"]["message"])
+        self.assertNotIn("401", reply["error"]["message"])
+        self.assertNotIn("not-a-github-token", json.dumps(reply))
+        self.assertNotIn("badly formatted", json.dumps(reply))
+
+    def test_a_400_invalid_token_challenge_is_auth_failed_without_the_sse_fallback(self):
+        self.start([remote("github", "/invalid_token")])
+        reply = self.client("github").request(init_request())
+        self.assertState(reply, "auth_failed")
+        self.assertEqual(reply["error"]["data"]["httpStatus"], 400)
+        self.assertFalse(any(m == "GET" for (m, p, h) in FakeMcp.seen))
+
+    def test_400_on_both_transports_without_credentials_is_bad_request(self):
+        server = dict(remote("open", "/github400"), headers={})
+        self.start([server])
+        reply = self.client("open").request(init_request())
+        self.assertState(reply, "bad_request")
+        self.assertEqual(reply["error"]["data"]["httpStatus"], 400)
+
+    def test_a_plain_400_is_bad_request_never_protocol_error(self):
+        error = broker._classify_status(400)
+        self.assertEqual((error.state, error.status), ("bad_request", 400))
+        self.assertEqual(broker._classify_status(422).state, "bad_request")
+        self.assertEqual(broker._classify_status(401).state, "auth_failed")
 
     def test_5xx_is_upstream_error(self):
         self.start([remote("broken", "/broken")])
@@ -760,9 +813,12 @@ class CheckTest(BrokerHarness):
         import neev_mcp_check as check
 
         self.start([remote("fireflies", "/mcp"), remote("unblocked", "/sse"),
-                    remote("aimfox", "/mcp", token="nope-nope-nope"), remote("gone", "/gone")])
+                    remote("aimfox", "/mcp", token="nope-nope-nope"), remote("gone", "/gone"),
+                    remote("github", "/github400", token="bad-paste-value")])
         results = {key: check.check(key, socket_dir=self.dir, connect_timeout=1)
-                   for key in ("fireflies", "unblocked", "aimfox", "gone", "absent")}
+                   for key in ("fireflies", "unblocked", "aimfox", "gone", "github", "absent")}
+        self.assertEqual(results["github"]["state"], "auth_failed")
+        self.assertEqual(results["github"]["httpStatus"], 400)
         self.assertEqual(results["fireflies"]["state"], "ready")
         self.assertEqual(results["fireflies"]["toolCount"], 2)
         self.assertEqual(results["unblocked"]["state"], "ready")

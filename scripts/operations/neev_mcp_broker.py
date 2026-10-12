@@ -27,8 +27,9 @@ Per integration:
 
 Failures reach the agent as JSON-RPC errors with a fixed state in
 `error.data.neevState` — `auth_failed`, `not_found`, `egress_denied`,
-`unreachable`, `upstream_error`, `protocol_error`, `package_unavailable`,
-`egress_not_configured` — never a credential and never the upstream's body.
+`unreachable`, `upstream_error`, `protocol_error`, `bad_request`,
+`package_unavailable`, `egress_not_configured` — never a credential and never
+the upstream's body.
 
 The bundle (servers + secrets) arrives as ONE line on stdin from the launcher.
 """
@@ -129,7 +130,7 @@ class IntegrationError(Exception):
         "invalid", "auth_failed", "forbidden", "session_expired", "busy", "not_found",
         "connection_lost", "egress_denied", "unreachable",
         "upstream_error", "protocol_error", "package_unavailable", "egress_not_configured",
-        "broker_unavailable",
+        "broker_unavailable", "bad_request",
     ))
 
     def __init__(self, state, status=None):
@@ -141,7 +142,7 @@ class IntegrationError(Exception):
 
 
 _MESSAGES = {
-    "auth_failed": "the service rejected the stored credentials (401); an admin must update them",
+    "auth_failed": "the service rejected the stored credentials; an admin must update them",
     "forbidden": "the credentials were accepted but this access is not allowed (403)",
     "session_expired": "the service ended the session and it could not be re-established",
     "connection_lost": "the connection was lost after the request was sent; the call may "
@@ -152,6 +153,8 @@ _MESSAGES = {
     "unreachable": "the service could not be reached",
     "upstream_error": "the service failed",
     "protocol_error": "the service answered in a way this broker does not understand",
+    "bad_request": "the service rejected the request as malformed (400); an admin should "
+                   "check the stored credentials and URL",
     "package_unavailable": "the integration package is not installed in this deployment",
     "egress_not_configured": "this run has no network path for integrations",
     "broker_unavailable": "the integration broker is not running for this run",
@@ -404,7 +407,17 @@ def _classify_status(status):
         return IntegrationError("not_found", status)
     if status >= 500:
         return IntegrationError("upstream_error", status)
+    if 400 <= status < 500:
+        return IntegrationError("bad_request", status)
     return IntegrationError("protocol_error", status)
+
+
+def _invalid_token_challenge(response):
+    """A `WWW-Authenticate: Bearer error="invalid_token"` reply: the credential
+    was refused, whatever the status (GitHub answers 400 to a token it cannot
+    parse)."""
+    challenge = response.getheader("WWW-Authenticate") or ""
+    return bool(re.search(r'(?i)\bbearer\b.*\berror\s*=\s*"?invalid_token\b', challenge))
 
 
 def _iter_sse(response):
@@ -595,10 +608,15 @@ class RemoteUpstream:
         try:
             # Backwards compatibility (MCP spec): a 4xx to the initialize POST
             # means "try the legacy HTTP+SSE transport" — 400, 404 or 405 seen.
+            # A 400 that names the token as invalid is a credential failure,
+            # not a legacy server: no fallback.
+            if is_init and response.status == 400 and _invalid_token_challenge(response):
+                response.read(65536)
+                raise IntegrationError("auth_failed", 400)
             if is_init and self.mode == "auto" and response.status in (400, 404, 405):
                 response.read(65536)
                 conn.close()
-                self._open_sse()
+                self._open_sse(after_status=response.status)
                 self._sse_post(message)
                 return []
             if response.status >= 300:
@@ -685,12 +703,21 @@ class RemoteUpstream:
                 self._post(notice, internal=True)
 
     # Legacy HTTP+SSE (2024-11-05): GET opens the stream, `endpoint` names the POST URL.
-    def _open_sse(self):
+    def _open_sse(self, after_status=None):
         conn, response = self._request("GET", self.url, accept="text/event-stream")
         if response.status >= 300:
+            status = response.status
+            invalid_token = _invalid_token_challenge(response)
             response.read(65536)
             conn.close()
-            raise _classify_status(response.status)
+            # The initialize POST got 400 and the legacy GET is refused too
+            # (400/401): no transport accepts these requests. With stored
+            # credentials that is the credential (GitHub answers 400 to a token
+            # it cannot parse), never "not an MCP server".
+            if invalid_token or (after_status == 400 and status in (400, 401)
+                                 and self.headers):
+                raise IntegrationError("auth_failed", status)
+            raise _classify_status(status)
         events = _iter_sse(response)
         deadline = time.monotonic() + SSE_ENDPOINT_TIMEOUT_SECONDS
         try:

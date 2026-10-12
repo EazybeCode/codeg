@@ -494,9 +494,11 @@ it("explains an existing GitHub integration and failures without echoing the tok
     await user.click(screen.getByRole("button", { name: "Connect" }))
     await waitFor(() => expect(calls).toBe(n))
   }
-  // Already connected: explained, nothing claimed.
+  // Already connected: explained, nothing claimed, pointed at the fix.
   await attempt(1)
-  expect(await screen.findByText(/github/i, { selector: "li" })).toBeVisible()
+  expect(await screen.findByText(/GitHub is already connected/)).toBeVisible()
+  expect(screen.getByText(/use Update credentials on GitHub/)).toBeVisible()
+  expect(screen.queryByText(/Some servers were not imported/)).toBeNull()
   expect(document.body.innerHTML).not.toContain(SYNTHETIC_TOKEN)
   // A server failure: an error, still no token anywhere.
   await attempt(2)
@@ -525,4 +527,104 @@ it("refuses a token with spaces before sending anything", async () => {
   expect(await screen.findByText(/single token/i)).toBeVisible()
   expect(calls).toBe(0)
   expect(document.body.innerHTML).not.toContain("two words")
+})
+
+const githubItem = {
+  ...skill,
+  id: "b230e18b-8102-4560-a358-6d8aac05c714",
+  name: "github",
+  description: "",
+  kind: "mcp",
+  files: ["mcp.json", "integration.json"],
+  setupNote: null,
+  integration: {
+    transport: "remote",
+    hosts: ["api.githubcopilot.com"],
+    secretNames: ["Authorization"],
+    source: "http:https://api.githubcopilot.com/mcp/",
+    notes: [],
+    status: {
+      state: "auth_failed",
+      checkedAt: "1700000000",
+      toolCount: null,
+      detail: "HTTP 400",
+      revision: "1",
+    },
+  },
+}
+
+it("shows the status detail and tells admins to update GitHub's token", async () => {
+  mockNativeSession(orgSession, {
+    "GET /api/neev/library": () => json({ items: [githubItem] }),
+  })
+  const user = userEvent.setup()
+  renderConnect()
+  await user.click(await screen.findByRole("button", { name: "Integrations" }))
+  expect(
+    await screen.findByText(/Credentials were rejected.*· HTTP 400/)
+  ).toBeVisible()
+  expect(
+    screen.getByText(/Use Update credentials to paste a new GitHub token/)
+  ).toBeVisible()
+})
+
+it("hides the credentials guidance from members", async () => {
+  mockNativeSession(
+    { ...orgSession, role: "member" },
+    { "GET /api/neev/library": () => json({ items: [githubItem] }) }
+  )
+  const user = userEvent.setup()
+  renderConnect()
+  await user.click(await screen.findByRole("button", { name: "Integrations" }))
+  expect(await screen.findByText(/· HTTP 400/)).toBeVisible()
+  expect(screen.queryByText(/Use Update credentials/)).toBeNull()
+})
+
+it("stores a pasted GitHub token as a Bearer Authorization header", async () => {
+  const bodies: unknown[] = []
+  mockNativeSession(orgSession, {
+    "GET /api/neev/library": () => json({ items: [githubItem] }),
+    [`PUT /api/neev/library/${githubItem.id}/secrets`]: (init) => {
+      bodies.push(JSON.parse(init.body as string))
+      return json({ code: "unavailable" }, 503)
+    },
+  })
+  const user = userEvent.setup()
+  renderConnect()
+  await user.click(await screen.findByRole("button", { name: "Integrations" }))
+  await user.click(
+    await screen.findByRole("button", { name: "Update credentials for github" })
+  )
+  expect(screen.getByText(/paste the GitHub token only/)).toBeVisible()
+  await user.type(screen.getByLabelText("Authorization"), SYNTHETIC_TOKEN)
+  await user.click(screen.getByRole("button", { name: "Save credentials" }))
+  await waitFor(() => expect(bodies).toHaveLength(1))
+  expect(bodies[0]).toEqual({
+    expectedRevision: "1",
+    env: {},
+    headers: { Authorization: `Bearer ${SYNTHETIC_TOKEN}` },
+  })
+})
+
+it("opens the existing GitHub item's credentials when Connect finds a duplicate", async () => {
+  mockNativeSession(orgSession, {
+    "GET /api/neev/library": () => json({ items: [githubItem] }),
+    "POST /api/neev/library/import": () =>
+      json(
+        { items: [], skipped: [{ name: "github", reason: "duplicate_name" }] },
+        422
+      ),
+  })
+  const user = userEvent.setup()
+  renderConnect()
+  await user.click(await screen.findByRole("button", { name: "Integrations" }))
+  await user.click(screen.getByRole("button", { name: "Connect GitHub" }))
+  await user.type(screen.getByLabelText("GitHub token"), SYNTHETIC_TOKEN)
+  await user.click(screen.getByRole("button", { name: "Connect" }))
+  await user.click(
+    await screen.findByRole("button", { name: "Update GitHub credentials" })
+  )
+  expect(screen.getByLabelText("Authorization")).toHaveValue("")
+  expect(screen.queryByText(/GitHub is already connected/)).toBeNull()
+  expect(document.body.innerHTML).not.toContain(SYNTHETIC_TOKEN)
 })

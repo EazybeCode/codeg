@@ -1,7 +1,11 @@
 import { expect, it } from "vitest"
 import {
+  credentialGuidance,
+  githubAuthorization,
   githubConnectionFile,
+  integrationStatusDetail,
   integrationStatusMessage,
+  unusualGithubToken,
   parseLibraryItem,
   skippedReasonMessage,
   validGithubToken,
@@ -143,4 +147,68 @@ it("builds the GitHub remote MCP connection and validates the token shape", asyn
       },
     },
   })
+})
+
+it("shows the status detail and points credential failures at Update credentials", () => {
+  const status = (state: string, detail: string | null = null) => ({
+    state,
+    checkedAt: "1",
+    toolCount: null,
+    detail,
+    revision: "1",
+  })
+  expect(integrationStatusDetail(status("auth_failed", "HTTP 400"))).toBe(
+    "HTTP 400"
+  )
+  expect(integrationStatusDetail(status("ready", "  "))).toBeNull()
+  expect(integrationStatusDetail(null)).toBeNull()
+  for (const state of ["bad_request", "runtime_disabled"])
+    expect(integrationStatusMessage(status(state))).not.toBe(state)
+  expect(integrationStatusMessage(status("auth_failed"))).not.toMatch(/401/)
+
+  const github = {
+    transport: "remote" as const,
+    hosts: ["api.githubcopilot.com"],
+    secretNames: ["Authorization"],
+    source: "import",
+    notes: [],
+    status: status("auth_failed", "HTTP 400"),
+  }
+  expect(credentialGuidance(github)).toMatch(/new GitHub token.*HTTP 400/)
+  // A status recorded before the broker knew GitHub's 400.
+  expect(
+    credentialGuidance({
+      ...github,
+      status: status("protocol_error", "HTTP 400"),
+    })
+  ).toMatch(/Update credentials/)
+  expect(
+    credentialGuidance({
+      ...github,
+      status: status("protocol_error", "HTTP 502"),
+    })
+  ).toBeNull()
+  expect(
+    credentialGuidance({ ...github, status: status("forbidden", "HTTP 403") })
+  ).toMatch(/refused this access/)
+  expect(credentialGuidance({ ...github, status: status("ready") })).toBeNull()
+  expect(credentialGuidance({ ...github, status: null })).toBeNull()
+  const other = { ...github, hosts: ["mcp.example.com"] }
+  expect(credentialGuidance(other)).toBe(
+    "Use Update credentials to enter new credentials, then Test again."
+  )
+  expect(credentialGuidance({ ...other, secretNames: [] })).toBeNull()
+})
+
+it("normalises a pasted GitHub token and hints at unusual shapes", () => {
+  expect(validGithubToken("Bearer ghp_ABC")).toBe("ghp_ABC")
+  expect(validGithubToken("token ghp_ABC")).toBe("ghp_ABC")
+  expect(validGithubToken("Bearer two words")).toBeNull()
+  expect(githubAuthorization(" bearer github_pat_X ")).toBe(
+    "Bearer github_pat_X"
+  )
+  expect(githubAuthorization("two words")).toBeNull()
+  expect(unusualGithubToken("github_pat_X")).toBe(false)
+  expect(unusualGithubToken("ghp_X")).toBe(false)
+  expect(unusualGithubToken("sk-something")).toBe(true)
 })

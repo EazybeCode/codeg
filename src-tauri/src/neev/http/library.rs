@@ -640,7 +640,7 @@ mod tests {
         assert!(bad.status_code().is_client_error());
         assert!(!bad.text().contains("synthetic-leak-000"));
 
-        // The default harness has no live runtime: the test reports that.
+        // The default harness has the runtime disabled: the test reports that.
         let tested = server
             .post(&test_path)
             .add_header(header::ORIGIN, "http://127.0.0.1:3100")
@@ -652,7 +652,7 @@ mod tests {
         assert_no_secrets(&tested.text());
         assert_eq!(
             tested.json::<Value>()["integration"]["status"]["state"],
-            "runtime_unavailable"
+            "runtime_disabled"
         );
     }
 

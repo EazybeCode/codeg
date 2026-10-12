@@ -37,7 +37,9 @@ export interface LibrarySkipped {
 }
 const STATUS_MESSAGES: Record<string, string> = {
   ready: "Ready",
-  auth_failed: "Credentials were rejected (401). Update the token.",
+  auth_failed: "Credentials were rejected. Update the token.",
+  bad_request:
+    "The service rejected the request as malformed. Check the stored credentials and URL.",
   forbidden: "Credentials were accepted but access is not allowed (403).",
   session_expired: "The service session expired. Run the test again.",
   connection_lost:
@@ -55,12 +57,57 @@ const STATUS_MESSAGES: Record<string, string> = {
   package_unavailable: "Package is not installed in this deployment.",
   vault_unavailable: "Stored credentials cannot be decrypted; re-enter them.",
   runtime_unavailable: "Agent runtime is unavailable; try again later.",
+  runtime_disabled:
+    "Integration tests are not enabled in this deployment. Ask an operator.",
 }
 export function integrationStatusMessage(
   status: LibraryIntegrationStatus | null | undefined
 ) {
   if (!status) return "Not tested yet"
   return STATUS_MESSAGES[status.state] ?? status.state
+}
+/** The server's short, secret-free detail (e.g. "HTTP 400"), if any. */
+export function integrationStatusDetail(
+  status: LibraryIntegrationStatus | null | undefined
+): string | null {
+  const detail = status?.detail?.trim()
+  return detail ? detail.slice(0, 80) : null
+}
+const CREDENTIAL_STATES = new Set([
+  "auth_failed",
+  "bad_request",
+  "forbidden",
+  "vault_unavailable",
+])
+/** GitHub's remote MCP server, however it was imported. */
+export function isGithubIntegration(
+  integration: LibraryIntegration | null | undefined
+) {
+  return (
+    integration?.transport === "remote" &&
+    integration.hosts.includes(GITHUB_MCP_HOST)
+  )
+}
+/** What an admin should do when a test points at the stored credentials, or
+ * null when it does not. A `protocol_error` with HTTP 400 is how statuses
+ * recorded before the broker learned GitHub's 400 read: the same cause. */
+export function credentialGuidance(
+  integration: LibraryIntegration | null | undefined
+): string | null {
+  const status = integration?.status
+  if (!integration?.secretNames.length || !status) return null
+  const legacy400 =
+    status.state === "protocol_error" &&
+    integrationStatusDetail(status) === "HTTP 400"
+  if (!CREDENTIAL_STATES.has(status.state) && !legacy400) return null
+  const github = isGithubIntegration(integration)
+  if (status.state === "forbidden")
+    return github
+      ? "GitHub accepted the token but refused this access. Use a token that can read what your team needs (or ask an org owner to allow it), then Update credentials and Test again."
+      : "The credentials lack the needed access. Update credentials with ones that have it, then Test again."
+  return github
+    ? "Use Update credentials to paste a new GitHub token (the whole token, nothing before it), then Test again. GitHub answers HTTP 400 to a token it cannot read and HTTP 401 to one that is wrong, expired or revoked."
+    : "Use Update credentials to enter new credentials, then Test again."
 }
 const SKIP_MESSAGES: Record<string, string> = {
   unsupported_package: "This package is not supported.",
@@ -253,14 +300,28 @@ async function importRequest(
 }
 /** GitHub's official remote MCP server (token as a Bearer header). */
 export const GITHUB_MCP_URL = "https://api.githubcopilot.com/mcp/"
+const GITHUB_MCP_HOST = "api.githubcopilot.com"
 const MAX_GITHUB_TOKEN_CHARS = 8000
 
-/** The trimmed token if it is one printable-ASCII word, else null. Nothing
- * about the token's permissions is assumed: the admin's Test tells. */
+/** The trimmed token if it is one printable-ASCII word, else null. A pasted
+ * `Bearer ` or `token ` prefix is dropped (it is added back as `Bearer`).
+ * Nothing about the token's permissions is assumed: the admin's Test tells. */
 export function validGithubToken(value: string): string | null {
-  const token = value.trim()
+  const token = value.trim().replace(/^(?:bearer|token)\s+/i, "")
   if (!token || token.length > MAX_GITHUB_TOKEN_CHARS) return null
   return /^[\x21-\x7e]+$/.test(token) ? token : null
+}
+
+/** True when the token does not start like any GitHub token. A hint only,
+ * never a block: GitHub may add prefixes, and Test is the authority. */
+export function unusualGithubToken(token: string) {
+  return !/^(?:ghp_|github_pat_|gho_|ghu_|ghs_|ghr_)/.test(token)
+}
+
+/** The `Authorization` header value for a GitHub token, or null. */
+export function githubAuthorization(value: string): string | null {
+  const token = validGithubToken(value)
+  return token ? `Bearer ${token}` : null
 }
 
 /** An MCP JSON import for GitHub's remote server. It goes through the same

@@ -7,6 +7,7 @@
 //! checks on every operation via proper transaction pattern.
 
 use crate::neev::{
+    agents::execution::ExecutionError,
     auth::session,
     db,
     error::{database_error, AuthError},
@@ -789,6 +790,12 @@ pub(crate) async fn test_integration(
             })
             .await
         {
+            // Keep the failures an admin can act on distinct: both lanes in
+            // use ("try again shortly") and a runtime that is off here.
+            Err(ExecutionError::LanesBusy) => ("busy".to_string(), None, None),
+            Err(ExecutionError::Disabled | ExecutionError::Unsupported) => {
+                ("runtime_disabled".to_string(), None, None)
+            }
             Err(_) => ("runtime_unavailable".to_string(), None, None),
             Ok(results) => results
                 .into_iter()
@@ -2964,14 +2971,38 @@ mod tests {
             .unwrap();
         assert_eq!(item.integration.unwrap().status.unwrap().state, "runtime_unavailable");
 
-        // The production default (disabled runtime) reports the same.
+        // The production default (disabled runtime) says so, not "try later".
         let harness = h::OrgHarness::new().await;
         let items = import_export(&harness).await;
         let id = item_id(&items, "unblocked");
         let item = test_integration(harness.state(), harness.owner_context(), &id, 1)
             .await
             .unwrap();
-        assert_eq!(item.integration.unwrap().status.unwrap().state, "runtime_unavailable");
+        assert_eq!(item.integration.unwrap().status.unwrap().state, "runtime_disabled");
+    }
+
+    #[tokio::test]
+    async fn integration_test_keeps_meaningful_runtime_errors() {
+        use crate::neev::agents::execution::ExecutionError as E;
+        for (error, expected) in [
+            (E::LanesBusy, "busy"),
+            (E::Disabled, "runtime_disabled"),
+            (E::Unsupported, "runtime_disabled"),
+            (E::Isolation, "runtime_unavailable"),
+            (E::Provider, "runtime_unavailable"),
+            (E::Unauthorized, "runtime_unavailable"),
+        ] {
+            let mut harness = h::OrgHarness::new().await;
+            set_runtime(&mut harness, fake(new_fake().failing(error.clone())));
+            let items = import_export(&harness).await;
+            let id = item_id(&items, "unblocked");
+            let item = test_integration(harness.state(), harness.owner_context(), &id, 1)
+                .await
+                .unwrap();
+            let status = item.integration.unwrap().status.unwrap();
+            assert_eq!(status.state, expected, "{error:?}");
+            assert_eq!(status.detail, None);
+        }
     }
 
     #[tokio::test]

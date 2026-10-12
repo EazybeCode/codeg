@@ -9,14 +9,19 @@ import { Dialog, DialogDescription, DialogTitle } from "@/components/ui/dialog"
 import { NativeDialogContent as DialogContent } from "./native-suspended-surface"
 import { NativeClientError } from "@/lib/neev-client"
 import {
+  credentialGuidance,
   deleteLibraryItem,
   enableLibraryItem,
+  githubAuthorization,
   githubConnectionFile,
   importLibrary,
+  integrationStatusDetail,
   integrationStatusMessage,
+  isGithubIntegration,
   loadLibrary,
   skippedReasonMessage,
   testLibraryItem,
+  unusualGithubToken,
   updateLibrarySecrets,
   validGithubToken,
   type LibraryItem,
@@ -47,6 +52,7 @@ export function NativeLibrary() {
   const [githubOpen, setGithubOpen] = useState(false)
   const [githubToken, setGithubToken] = useState("")
   const [githubInvalid, setGithubInvalid] = useState(false)
+  const [githubDuplicate, setGithubDuplicate] = useState(false)
   const [refresh, setRefresh] = useState(0)
   const alive = useRef(false)
   const locked = useRef(false)
@@ -106,6 +112,7 @@ export function NativeLibrary() {
   async function upload(files: File[]) {
     setFailures([])
     setSkipped([])
+    setGithubDuplicate(false)
     await mutate(async () => {
       let count = 0
       const failed: string[] = []
@@ -155,6 +162,7 @@ export function NativeLibrary() {
       return
     }
     setGithubInvalid(false)
+    setGithubDuplicate(false)
     setFailures([])
     setSkipped([])
     void mutate(async () => {
@@ -165,14 +173,26 @@ export function NativeLibrary() {
       )
       if (!alive.current || auth.signal?.aborted) return
       const added = result.items
-      setSkipped(result.skipped.map((s) => ({ file: "github.json", ...s })))
+      // Already connected: nothing changed. Point at the existing item's
+      // Update credentials rather than a generic "not imported".
+      const duplicate = (s: { name: string; reason: string }) =>
+        s.name === "github" && s.reason === "duplicate_name"
+      setGithubDuplicate(result.skipped.some(duplicate))
+      setSkipped(
+        result.skipped
+          .filter((s) => !duplicate(s))
+          .map((s) => ({ file: "github.json", ...s }))
+      )
       setItems((rows) => [
         ...rows.filter((row) => !added.some((item) => item.id === row.id)),
         ...added,
       ])
       if (added.length)
         setNotice(
-          "GitHub was added but is not tested yet. Press Test, then enable it for your team."
+          "GitHub was added but is not tested yet. Press Test, then enable it for your team." +
+            (unusualGithubToken(token)
+              ? " The token does not start like a GitHub token (ghp_ or github_pat_); if Test reports rejected credentials, check the paste."
+              : "")
         )
     })
   }
@@ -189,10 +209,16 @@ export function NativeLibrary() {
     // package reads environment variables, a remote server gets headers —
     // never the shape of the name (a remote header may well be `APIKEY`).
     const target = item.integration.transport === "package" ? env : headers
+    // GitHub's whole Authorization header is the stored secret: an admin
+    // pastes the token, the scheme is added (a bare token gets HTTP 400).
+    const github = isGithubIntegration(item.integration)
     for (const name of item.integration.secretNames) {
       const value = secrets[name]
       if (!value) continue
-      target[name] = value
+      target[name] =
+        github && name === "Authorization"
+          ? (githubAuthorization(value) ?? value)
+          : value
     }
     // Secrets never outlive the submit, whatever the outcome.
     closeSecrets()
@@ -327,6 +353,38 @@ export function NativeLibrary() {
           </div>
         </form>
       )}
+      {githubDuplicate && (
+        <div role="alert" className="space-y-2 text-sm">
+          <p>
+            GitHub is already connected in this workspace, so nothing was
+            changed. To replace its token, use Update credentials on GitHub,
+            then Test.
+          </p>
+          {(() => {
+            const existing = items.find(
+              (row) =>
+                row.kind === "mcp" &&
+                row.name === "github" &&
+                (row.integration?.secretNames.length ?? 0) > 0
+            )
+            return existing ? (
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={busy}
+                onClick={() => {
+                  setGithubDuplicate(false)
+                  setKind("mcp")
+                  setSecrets({})
+                  setSecretItem(existing)
+                }}
+              >
+                Update GitHub credentials
+              </Button>
+            ) : null
+          })()}
+        </div>
+      )}
       {githubInvalid && (
         <p role="alert" className="text-sm text-destructive">
           Paste the GitHub token as a single token, without spaces.
@@ -443,9 +501,16 @@ export function NativeLibrary() {
                     <p>
                       Status:{" "}
                       {integrationStatusMessage(item.integration.status)}
+                      {integrationStatusDetail(item.integration.status) &&
+                        ` · ${integrationStatusDetail(item.integration.status)}`}
                       {item.integration.status?.toolCount != null &&
                         ` · ${item.integration.status.toolCount} tools`}
                     </p>
+                    {admin && credentialGuidance(item.integration) && (
+                      <p className="break-words text-destructive">
+                        {credentialGuidance(item.integration)}
+                      </p>
+                    )}
                     <p>Members’ agents can use it when enabled.</p>
                     {admin && secretItem?.id === item.id && (
                       <form
@@ -458,7 +523,12 @@ export function NativeLibrary() {
                       >
                         {item.integration.secretNames.map((name) => (
                           <label key={name} className="block space-y-1">
-                            <span>{name}</span>
+                            <span>
+                              {name}
+                              {isGithubIntegration(item.integration) &&
+                                name === "Authorization" &&
+                                " (paste the GitHub token only)"}
+                            </span>
                             <Input
                               type="password"
                               autoComplete="new-password"
