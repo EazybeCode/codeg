@@ -76,6 +76,7 @@ async fn catalog(db: &DatabaseConnection) -> Vec<String> {
 /// the (empty) schema-24 sharing, schema-23 trash and schema-22 knowledge
 /// layers off first.
 async fn at_twenty_one(db: &DatabaseConnection) {
+    assert_eq!(downgrade_msteams(db).await, Ok(msteams_migration::Downgrade::Done));
     assert_eq!(downgrade_member_sharing(db).await, Ok(member_sharing_migration::Downgrade::Done));
     assert_eq!(downgrade_node_trash(db).await, Ok(node_trash_migration::Downgrade::Done));
     assert_eq!(

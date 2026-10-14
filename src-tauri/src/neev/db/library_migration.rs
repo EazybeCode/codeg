@@ -257,7 +257,13 @@ mod tests {
         let (org, _) = h::organization(&db, user, "admin").await;
         // Schema 19's steer table and schema 21's sharing defaults are newer
         // than 17: remove them too, or the inventory matches no known version.
-        // Schema 24's sharing tables are newest, then schema 23's trash ledger.
+        // Schema 25's Teams tables are newest, then schema 24's sharing tables,
+        // then schema 23's trash ledger.
+        for table in super::super::msteams_migration::DROP_ORDER {
+            execute(&db, &format!("DROP TABLE {table}"), vec![])
+                .await
+                .unwrap();
+        }
         for table in ["neev_restricted_nodes", "neev_shared_marks", "neev_grants", "neev_team_members", "neev_teams"] {
             execute(&db, &format!("DROP TABLE {table}"), vec![])
                 .await

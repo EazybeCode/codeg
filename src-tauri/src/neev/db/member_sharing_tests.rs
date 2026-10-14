@@ -85,8 +85,16 @@ async fn share(db: &DatabaseConnection, org: i32, user: i32, member: i32, folder
     execute(db, "INSERT INTO neev_shared_marks(org_id,mark_kind,target_id,set_by,created_at) VALUES($1,'resource',$2,$3,1000)", vec![org.into(), DOC.into(), user.into()]).await.unwrap();
 }
 
+/// A fresh install is schema 25; these tests are about the 24 layer, so take
+/// the (empty) schema-25 Teams tables off first.
+async fn at_twenty_four(db: &DatabaseConnection) {
+    assert_eq!(downgrade_msteams(db).await, Ok(msteams_migration::Downgrade::Done));
+    assert_eq!(version(db).await, member_sharing_migration::SCHEMA_VERSION);
+}
+
 async fn fresh_is_twenty_four(db: &DatabaseConnection) {
-    assert_eq!(CURRENT_SCHEMA_VERSION, 24);
+    assert_eq!(CURRENT_SCHEMA_VERSION, 25);
+    at_twenty_four(db).await;
     assert_eq!(version(db).await, member_sharing_migration::SCHEMA_VERSION);
     assert_eq!(tables(db).await, 5);
     assert_eq!(member_sharing_migration::validate(db).await, Ok(()));
@@ -124,6 +132,7 @@ async fn fresh_is_twenty_four(db: &DatabaseConnection) {
 /// 23 -> 24 changes no existing row, so no audience widens; restart at 24 is a
 /// no-op.
 async fn twenty_three_upgrades_preserving_rows(db: &DatabaseConnection) {
+    at_twenty_four(db).await;
     assert_eq!(downgrade_member_sharing(db).await, Ok(member_sharing_migration::Downgrade::Done));
     assert_eq!(version(db).await, 23);
     assert_eq!(tables(db).await, 0);
@@ -132,7 +141,8 @@ async fn twenty_three_upgrades_preserving_rows(db: &DatabaseConnection) {
     let before = rows(db).await;
     assert_eq!(before.len(), 5);
     initialize(db).await.unwrap();
-    assert_eq!(version(db).await, 24);
+    // The upgrade runs through to the current schema (25).
+    assert_eq!(version(db).await, CURRENT_SCHEMA_VERSION);
     assert_eq!(tables(db).await, 5);
     assert_eq!(rows(db).await, before, "the migration rewrote an existing row");
     for table in member_sharing_migration::TABLE_NAMES {
@@ -147,6 +157,7 @@ async fn twenty_three_upgrades_preserving_rows(db: &DatabaseConnection) {
 /// Any team, grant or mark refuses the downgrade, which then changes nothing;
 /// with none it lands on exactly the schema-23 catalog, and re-migrates.
 async fn downgrade_is_guarded(db: &DatabaseConnection) {
+    at_twenty_four(db).await;
     let fresh = catalog(db).await;
     let expected: Vec<String> = fresh
         .iter()
@@ -187,7 +198,8 @@ async fn downgrade_is_guarded(db: &DatabaseConnection) {
         Ok(member_sharing_migration::Downgrade::NotAtTwentyFour(23))
     );
     initialize(db).await.unwrap();
-    assert_eq!(version(db).await, 24);
+    assert_eq!(version(db).await, CURRENT_SCHEMA_VERSION);
+    at_twenty_four(db).await;
     assert_eq!(catalog(db).await, fresh);
 }
 
@@ -259,7 +271,9 @@ async fn incoherent_sharing_rows_are_refused() {
     execute(&db, "CREATE TABLE neev_grants (org_id integer NOT NULL, target_kind text NOT NULL, target_id text NOT NULL, principal_kind text NOT NULL, principal_id text NOT NULL, level text NOT NULL, granted_by integer NOT NULL, created_at bigint NOT NULL, CONSTRAINT neev_grants_pk PRIMARY KEY (org_id, target_kind, target_id, principal_kind, principal_id))", vec![]).await.unwrap();
     assert_eq!(initialize(&db).await, Err(AuthError::Unavailable));
     assert_eq!(validate_content_snapshot(&db).await, Err(AuthError::Unavailable));
-    assert_eq!(downgrade_member_sharing(&db).await, Err(AuthError::Unavailable));
+    // Stepping down from 25 re-proves the 24 layer and refuses (rolled back).
+    assert_eq!(downgrade_msteams(&db).await, Err(AuthError::Unavailable));
+    assert_eq!(version(&db).await, CURRENT_SCHEMA_VERSION);
 
     // A stray index on a sharing table.
     let db = h::database().await;

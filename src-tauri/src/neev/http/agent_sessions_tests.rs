@@ -2468,6 +2468,172 @@ mod auto_routing {
         assert!(status["maxTaskChars"].as_u64().unwrap() > 0);
     }
 
+    /// The integration-client path (Teams): an idempotent turn is still Auto
+    /// routed, and its replay neither routes again nor runs again.
+    #[tokio::test]
+    async fn an_idempotent_auto_turn_routes_once_and_replays_without_rerouting() {
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (router, picker) = pick("Opus");
+        let database = h::database().await;
+        let user = h::native_account(&database, "owner", "owner@example.test").await;
+        let (org, _) = h::organization(&database, user, "admin").await;
+        let mut server_state = ServerState::new(
+            database.clone(),
+            h::preview_config(),
+            Arc::new(h::TestClock::new(NOW)),
+        )
+        .unwrap();
+        server_state.set_agent_runtime(AgentRuntime::Fake(
+            FakeRuntime::new(vec!["done".to_owned()]).recording(log.clone()),
+        ));
+        server_state.set_agent_router(router);
+        let state = Arc::new(server_state);
+        let actor = h::scoped_context(&database, user, org, NOW).await;
+        let session = crate::neev::agents::sessions::create(
+            &state,
+            &actor,
+            crate::neev::agents::sessions::SessionInput {
+                title: "Teams · Proposals".to_owned(),
+                provider: "claude".to_owned(),
+                model: "default".to_owned(),
+                bound_chat_id: None,
+                node_id: None,
+                effort: None,
+                fast: false,
+                request_id: "6f1c0d3e-8a2b-4c5d-9e7f-0a1b2c3d4e5f".to_owned(),
+            },
+        )
+        .await
+        .unwrap();
+        let request = "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d";
+        let prompt = "Redesign the sync engine across three services";
+        let first = crate::neev::http::launch_session_turn(
+            &state,
+            &actor,
+            &session.id,
+            prompt.to_owned(),
+            Vec::new(),
+            true,
+            None,
+            Some(request),
+            crate::neev::http::LaunchAudience::Owner,
+        )
+        .await
+        .unwrap();
+        assert!(first.created);
+        assert_eq!(first.turn.model, "opus");
+        assert_eq!(picker.calls.load(Ordering::SeqCst), 1);
+
+        let replay = crate::neev::http::launch_session_turn(
+            &state,
+            &actor,
+            &session.id,
+            prompt.to_owned(),
+            Vec::new(),
+            true,
+            None,
+            Some(request),
+            crate::neev::http::LaunchAudience::Owner,
+        )
+        .await
+        .unwrap();
+        assert!(!replay.created);
+        assert_eq!(replay.turn.run_id, first.turn.run_id);
+        // No second routing decision and no second run.
+        assert_eq!(picker.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(log.lock().unwrap().len(), 1);
+    }
+
+    /// A replay must be the SAME ask, files included: reusing a request id with
+    /// a different attachment set is a conflict, even on the early (pre-routing)
+    /// replay path — exactly as `sessions::begin` decides it.
+    #[tokio::test]
+    async fn an_idempotent_replay_with_changed_attachments_is_a_conflict() {
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let database = h::database().await;
+        let user = h::native_account(&database, "owner", "owner@example.test").await;
+        let (org, _) = h::organization(&database, user, "admin").await;
+        let mut server_state = ServerState::new(
+            database.clone(),
+            h::preview_config(),
+            Arc::new(h::TestClock::new(NOW)),
+        )
+        .unwrap();
+        server_state.set_agent_runtime(AgentRuntime::Fake(
+            FakeRuntime::new(vec!["done".to_owned()]).recording(log.clone()),
+        ));
+        let state = Arc::new(server_state);
+        let actor = h::scoped_context(&database, user, org, NOW).await;
+        let session = crate::neev::agents::sessions::create(
+            &state,
+            &actor,
+            crate::neev::agents::sessions::SessionInput {
+                title: "Replay".to_owned(),
+                provider: "claude".to_owned(),
+                model: "default".to_owned(),
+                bound_chat_id: None,
+                node_id: None,
+                effort: None,
+                fast: false,
+                request_id: "7f1c0d3e-8a2b-4c5d-9e7f-0a1b2c3d4e5f".to_owned(),
+            },
+        )
+        .await
+        .unwrap();
+        let first_file = crate::neev::content::attachment::store(
+            &state,
+            &actor,
+            crate::neev::content::attachment::Owner::Session(&session.id),
+            "data.csv",
+            b"a,b\n1,2\n",
+        )
+        .await
+        .unwrap();
+        let other_file = crate::neev::content::attachment::store(
+            &state,
+            &actor,
+            crate::neev::content::attachment::Owner::Session(&session.id),
+            "other.csv",
+            b"c,d\n3,4\n",
+        )
+        .await
+        .unwrap();
+        let request = "2a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d";
+        let launch = |keys: Vec<String>| {
+            let state = state.clone();
+            let actor = actor.clone();
+            let session_id = session.id.clone();
+            async move {
+                crate::neev::http::launch_session_turn(
+                    &state,
+                    &actor,
+                    &session_id,
+                    "Summarize the file".to_owned(),
+                    keys,
+                    false,
+                    None,
+                    Some(request),
+                    crate::neev::http::LaunchAudience::Owner,
+                )
+                .await
+            }
+        };
+        let first = launch(vec![first_file.key.clone()]).await.unwrap();
+        assert!(first.created);
+        // The same ask replays.
+        let same = launch(vec![first_file.key.clone()]).await.unwrap();
+        assert!(!same.created);
+        assert_eq!(same.turn.run_id, first.turn.run_id);
+        // A swapped, dropped or added file under the same request id conflicts.
+        for keys in [vec![other_file.key.clone()], Vec::new(), vec![first_file.key.clone(), other_file.key.clone()]] {
+            assert!(
+                matches!(launch(keys.clone()).await, Err(crate::neev::http::ApiError::Conflict)),
+                "{keys:?} must conflict"
+            );
+        }
+        assert_eq!(log.lock().unwrap().len(), 1, "one run only");
+    }
+
     #[tokio::test]
     async fn an_auto_turn_runs_and_records_the_routed_model() {
         let log = Arc::new(std::sync::Mutex::new(Vec::new()));

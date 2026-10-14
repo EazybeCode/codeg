@@ -102,13 +102,14 @@ async fn insert_chain(db: &DatabaseConnection, org: i32, user: i32) {
 /// A fresh install is schema 24; these tests are about the 22 layer, so take
 /// the (empty) schema-24 sharing tables and schema-23 trash ledger off first.
 async fn at_twenty_two(db: &DatabaseConnection) {
+    assert_eq!(downgrade_msteams(db).await, Ok(msteams_migration::Downgrade::Done));
     assert_eq!(downgrade_member_sharing(db).await, Ok(member_sharing_migration::Downgrade::Done));
     assert_eq!(downgrade_node_trash(db).await, Ok(node_trash_migration::Downgrade::Done));
     assert_eq!(version(db).await, knowledge_migration::SCHEMA_VERSION);
 }
 
 async fn fresh_is_twenty_two(db: &DatabaseConnection) {
-    assert_eq!(CURRENT_SCHEMA_VERSION, member_sharing_migration::SCHEMA_VERSION);
+    assert_eq!(CURRENT_SCHEMA_VERSION, msteams_migration::SCHEMA_VERSION);
     at_twenty_two(db).await;
     assert_eq!(version(db).await, knowledge_migration::SCHEMA_VERSION);
     assert_eq!(knowledge_migration::TABLE_NAMES.len(), 12);

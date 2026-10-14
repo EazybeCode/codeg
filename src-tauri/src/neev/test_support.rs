@@ -823,6 +823,7 @@ pub(super) fn preview_config() -> super::config::Config {
         knowledge_root: None,
         routing: super::config::RoutingConfig::Off,
         supervision: super::config::SupervisionConfig::off(),
+        teams: None,
         _document_root_guard: Some(document_root),
         _knowledge_root_guard: None,
     }

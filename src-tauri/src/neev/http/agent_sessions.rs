@@ -580,31 +580,135 @@ pub(super) async fn start_turn(
         catalog::organization_mutation::<StartTurnInput>(&state, request, TURN_BODY_LIMIT).await?;
     let keys = requested_keys(&input.attachment_keys)?;
     let prompt = sent_text(input.prompt, keys.len());
-    let session = sessions::get(&state, &actor, &session_id).await?;
+    let launched = launch_session_turn(
+        &state,
+        &actor,
+        &session_id,
+        prompt,
+        keys,
+        input.auto,
+        input.route_id,
+        None,
+        LaunchAudience::Owner,
+    )
+    .await?;
+    let mut response = private_json(StartedTurnDto {
+        route: launched.route,
+        run_id: launched.turn.run_id.clone(),
+        // Just-started (or immediately settled) turns have no steering inputs.
+        turn: turn_dto(launched.turn, attachment_dtos(launched.carried), Vec::new()),
+    });
+    *response.status_mut() = StatusCode::CREATED;
+    Ok(response)
+}
+
+/// Who will read a launched turn's answer. It decides what the agent is
+/// briefed with, because the model can repeat anything it is told.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::neev) enum LaunchAudience {
+    /// Only the session's owner (web chat, a Teams 1:1 chat): the briefing
+    /// may name everything the owner could open.
+    Owner,
+    /// Published to people beyond the owner (a Teams channel thread), who
+    /// need not be members of this organization: the run is given NOTHING
+    /// from the workspace — no briefing context, knowledge, library items,
+    /// session transcript or earlier turns of the session (which may hold
+    /// answers that were withheld from the channel). The thread the channel
+    /// already reads is the request itself.
+    Published,
+}
+
+/// A turn begun by [`launch_session_turn`].
+pub(in crate::neev) struct LaunchedTurn {
+    /// The durable turn: running, or already settled with its honest reason.
+    pub(in crate::neev) turn: AgentTurn,
+    carried: Vec<StoredAttachment>,
+    route: Option<routing::RouteDto>,
+    /// False when `request_id` named a turn that already existed: nothing was
+    /// launched, and the caller must not announce a second run.
+    pub(in crate::neev) created: bool,
+}
+
+/// Begin a saved-session turn and launch its run — the ONE path the web chat
+/// and every integration client (Microsoft Teams) share, so authorization,
+/// the one-live-turn rule, credentials, context and honest refusals cannot
+/// drift between them.
+///
+/// `request_id`, when given, makes the turn idempotent (see
+/// `sessions::begin_turn`): a replay resolves to the first attempt's turn and
+/// never launches a second run. Auto routing is kept for idempotent turns: a
+/// request id that already produced a turn is answered from storage BEFORE
+/// routing (no second routing decision), and two racing first attempts are
+/// arbitrated by the turn's unique request id, so exactly one runs.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::neev) async fn launch_session_turn(
+    state: &Arc<ServerState>,
+    actor: &OrgContext,
+    session_id: &str,
+    prompt: String,
+    keys: Vec<String>,
+    auto: bool,
+    route_id: Option<String>,
+    request_id: Option<&str>,
+    audience: LaunchAudience,
+) -> Result<LaunchedTurn, ApiError> {
+    let state = state.clone();
+    let session_id = session_id.to_owned();
+    if let Some(request) = request_id {
+        if let Some(existing) =
+            sessions::session_turn_by_request(&state, actor, &session_id, request).await?
+        {
+            let carried = turn_attachments(&state, actor, &session_id, existing.sequence).await?;
+            // A replay must be the same ask, files included — exactly the rule
+            // `sessions::begin` applies on the late path: a retry that swapped,
+            // dropped or added a file is a conflict, not a replay.
+            if stored_keys(&carried) != keys {
+                return Err(ApiError::Conflict);
+            }
+            return Ok(LaunchedTurn {
+                turn: existing,
+                carried,
+                route: None,
+                created: false,
+            });
+        }
+    }
+    let session = sessions::get(&state, actor, &session_id).await?;
     // Resolved BEFORE the turn exists: an unreadable key, one uploaded to
     // another conversation, or a set over the per-turn budget is a plain
     // refusal here rather than a turn that has to be settled as failed.
     let resolved =
-        attachment::resolve_for_run(&state, &actor, Owner::Session(&session_id), &keys).await?;
+        attachment::resolve_for_run(&state, actor, Owner::Session(&session_id), &keys).await?;
+    let published = audience == LaunchAudience::Published;
     // Context is gathered BEFORE the new turn exists so it cannot include
     // itself, and only completed turns contribute (§ `conversation_prompt`).
-    let history = sessions::recent_turns(&state, &actor, &session_id).await?;
+    // A published run replays none: an earlier answer of this session may
+    // have been withheld from the channel.
+    let history = if published {
+        Vec::new()
+    } else {
+        sessions::recent_turns(&state, actor, &session_id).await?
+    };
     // Decided BEFORE the turn exists, so it can never change the model under a
     // running tool loop, race a steer or a stop, or start a second run: the
     // one-live-turn rule below still arbitrates.
-    let route = if input.auto {
-        Some(routing::route_turn(&state, &actor, &session, &prompt, keys.len(), &history).await)
+    let route = if auto {
+        Some(routing::route_turn(&state, actor, &session, &prompt, keys.len(), &history).await)
     } else {
-        input
-            .route_id
+        route_id
             .as_deref()
             .filter(|id| id.len() <= 64)
-            .and_then(|id| routing::take_ticket(&state, &actor, id, &session))
+            .and_then(|id| routing::take_ticket(&state, actor, id, &session))
     };
     // Supervision is resolved before the turn exists, too: a supervisor that
     // cannot be had makes an ordinary turn, never an error.
-    let (supervision_plan, supervision_view) =
-        routing::supervision_for(&state, &actor, route.as_ref()).await;
+    // A published run is never supervised: a planner's or reviewer's own
+    // tool use is not in the trace the channel gate classifies.
+    let (supervision_plan, supervision_view) = if published {
+        (Default::default(), None)
+    } else {
+        routing::supervision_for(&state, actor, route.as_ref()).await
+    };
     let mut route_view = route
         .as_ref()
         .map(|route| routing::route_dto(route).with_supervision(supervision_view.clone()));
@@ -615,20 +719,24 @@ pub(super) async fn start_turn(
     // turns of THIS session attached, so a follow-up question about a document
     // does not require sending it again. Best effort, like the briefing: a run
     // must not fail because its own history could not be assembled.
-    let context = transcript::build(
-        &state,
-        &actor,
-        transcript::Source::Session {
-            session_id: &session_id,
-        },
-        &keys,
-    )
-    .await;
+    let context = if published {
+        None
+    } else {
+        transcript::build(
+            &state,
+            actor,
+            transcript::Source::Session {
+                session_id: &session_id,
+            },
+            &keys,
+        )
+        .await
+    };
     // The INVOKER's own per-user credential (§5.4). Looked up from the actor's
     // connection row, never supplied by the request; `None` here makes the
     // sandboxed runtime refuse rather than fall back to a host identity.
     let credential_handle = match provider_of(&session.provider) {
-        Some(provider) => intents::credential(&state, &actor, provider)
+        Some(provider) => intents::credential(&state, actor, provider)
             .await
             .map_err(super::agent_error)?,
         None => None,
@@ -636,20 +744,26 @@ pub(super) async fn start_turn(
     // Load enabled library items for the org BEFORE creating the pending turn.
     // A failure here is reported honestly as Unavailable rather than leaving a
     // forever-running turn.
-    let library_items = load_library_items(&state, &actor).await?;
+    // Never for a published run: a skill's text is organization material.
+    let library_items = if published {
+        Vec::new()
+    } else {
+        load_library_items(&state, actor).await?
+    };
 
-    // A saved-session turn carries no request id, so this caller is always
-    // its creator. The references commit with the turn row.
+    // The references commit with the turn row. With a `request_id` a replay
+    // resolves to the first attempt's turn (`created == false`).
     let routed = route
         .as_ref()
         .filter(|route| route.outcome == crate::neev::agents::routing::Outcome::Routed);
-    let (turn, _created) = match routed {
+    let (turn, created) = match routed {
         Some(route) => {
             sessions::begin_routed_turn(
                 &state,
-                &actor,
+                actor,
                 &session_id,
                 &prompt,
+                request_id,
                 &keys,
                 &sessions::RoutedSettings {
                     model: route.selection.model.clone(),
@@ -661,10 +775,29 @@ pub(super) async fn start_turn(
             .await?
         }
         None => {
-            sessions::begin_turn_with_attachments(&state, &actor, &session_id, &prompt, None, &keys)
-                .await?
+            sessions::begin_turn_with_attachments(
+                &state,
+                actor,
+                &session_id,
+                &prompt,
+                request_id,
+                &keys,
+            )
+            .await?
         }
     };
+    if !created {
+        // A replay: the first attempt owns the run. Report what is stored —
+        // and no route: this attempt's routing decision was never applied.
+        let carried = turn_attachments(&state, actor, &session_id, turn.sequence).await?;
+        let turn = sessions::turn_by_run(&state, actor, &turn.run_id).await?;
+        return Ok(LaunchedTurn {
+            turn,
+            carried,
+            route: None,
+            created: false,
+        });
+    }
     // What runs: the routed selection, or the session's own settings.
     let (run_model, run_effort, run_fast) = match routed {
         Some(route) => (
@@ -677,36 +810,38 @@ pub(super) async fn start_turn(
     // The run is described by STORAGE, not by the request: the references just
     // committed are read back and required to be the set that was resolved. A
     // mismatch settles the turn instead of launching against the wrong files.
-    let carried = turn_attachments(&state, &actor, &session_id, turn.sequence).await?;
+    let carried = turn_attachments(&state, actor, &session_id, turn.sequence).await?;
     if stored_keys(&carried) != keys {
         runs::settle_refusal(&state, &turn.run_id, "unavailable").await?;
-        let settled = sessions::turn_by_run(&state, &actor, &turn.run_id).await?;
-        let mut response = private_json(StartedTurnDto {
-                route: route_view.take(),
-            run_id: settled.run_id.clone(),
-            // Immediately settled turns have no steering inputs
-            turn: turn_dto(settled, attachment_dtos(carried), Vec::new()),
+        let settled = sessions::turn_by_run(&state, actor, &turn.run_id).await?;
+        return Ok(LaunchedTurn {
+            turn: settled,
+            carried,
+            route: route_view.take(),
+            created: true,
         });
-        *response.status_mut() = StatusCode::CREATED;
-        return Ok(response);
     }
     let composed = sessions::conversation_prompt(&history, &turn.prompt);
     // Best effort: a run must not fail because its orientation could not be
     // read. Without it the agent answers about the sandbox it woke up in.
-    let briefing = crate::neev::agents::briefing::build(
-        &state,
-        &actor,
-        crate::neev::agents::briefing::Scope::Session {
-            node_id: session.node_id,
-        },
-        &turn.prompt,
-        context.as_ref().map(|bundle| &bundle.manifest),
-    )
-    .await;
-    // Per turn, recomputed every time: the org's relevant compiled knowledge
-    // this member may read (shared-eligible, readable now), capped, as
-    // context files plus a citation note. Never fails the run.
-    let (briefing, knowledge_files) = with_knowledge(&state, &actor, &turn.prompt, briefing).await;
+    let (briefing, knowledge_files) = if published {
+        (Some(crate::neev::agents::briefing::published()), Vec::new())
+    } else {
+        let briefing = crate::neev::agents::briefing::build(
+            &state,
+            actor,
+            crate::neev::agents::briefing::Scope::Session {
+                node_id: session.node_id,
+            },
+            &turn.prompt,
+            context.as_ref().map(|bundle| &bundle.manifest),
+        )
+        .await;
+        // Per turn, recomputed every time: the org's relevant compiled knowledge
+        // this member may read (shared-eligible, readable now), capped, as
+        // context files plus a citation note. Never fails the run.
+        with_knowledge(&state, actor, &turn.prompt, briefing).await
+    };
 
     let run_request = RunRequest {
         // Server-authoritative identity: never a client-supplied user/org.
@@ -759,13 +894,12 @@ pub(super) async fn start_turn(
             // A saved Agent Chat is private: no publication, ever.
             None,
         );
-        let mut response = private_json(StartedTurnDto {
+        return Ok(LaunchedTurn {
+            turn,
+            carried,
             route: route_view.take(),
-            run_id: turn.run_id.clone(),
-            turn: turn_dto(turn, attachment_dtos(carried), Vec::new()),
+            created: true,
         });
-        *response.status_mut() = StatusCode::CREATED;
-        return Ok(response);
     }
     match state.agents.run(run_request).await {
         Ok(handle) => {
@@ -779,14 +913,12 @@ pub(super) async fn start_turn(
                 // A saved Agent Chat is private: no publication, ever.
                 None,
             );
-            // Just-started turns have no steering inputs yet
-            let mut response = private_json(StartedTurnDto {
+            Ok(LaunchedTurn {
+                turn,
+                carried,
                 route: route_view.take(),
-                run_id: turn.run_id.clone(),
-                turn: turn_dto(turn, attachment_dtos(carried), Vec::new()),
-            });
-            *response.status_mut() = StatusCode::CREATED;
-            Ok(response)
+                created: true,
+            })
         }
         Err(error) => {
             // Honest refusal: settle the durable turn with the real reason and
@@ -794,15 +926,13 @@ pub(super) async fn start_turn(
             // than a fake pending state or a fake queue position.
             let code = sessions::execution_error_code(&error);
             runs::settle_refusal(&state, &turn.run_id, code).await?;
-            let settled = sessions::turn_by_run(&state, &actor, &turn.run_id).await?;
-            // Immediately settled turns have no steering inputs
-            let mut response = private_json(StartedTurnDto {
+            let settled = sessions::turn_by_run(&state, actor, &turn.run_id).await?;
+            Ok(LaunchedTurn {
+                turn: settled,
+                carried,
                 route: route_view.take(),
-                run_id: settled.run_id.clone(),
-                turn: turn_dto(settled, attachment_dtos(carried), Vec::new()),
-            });
-            *response.status_mut() = StatusCode::CREATED;
-            Ok(response)
+                created: true,
+            })
         }
     }
 }

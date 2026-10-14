@@ -1299,16 +1299,39 @@ pub(crate) async fn latest_team_session(
 /// follow-up keeps it. Refused with `Conflict` when the session changed since
 /// routing read it — a concurrent manual change wins rather than being
 /// overwritten by a decision made against the old state.
+///
+/// `request_id` makes the turn idempotent exactly as for `begin_turn`: a replay
+/// resolves to the first attempt's turn (`false`) before the revision check, so
+/// a retry that raced its own routed write is a replay, not a `Conflict`.
 pub(crate) async fn begin_routed_turn(
     state: &ServerState,
     actor: &OrgContext,
     session_id: &str,
     text: &str,
+    request_id: Option<&str>,
     attachment_keys: &[String],
     routed: &RoutedSettings,
 ) -> Result<(AgentTurn, bool), ContentError> {
     model(&routed.model)?;
-    begin(state, actor, session_id, text, None, attachment_keys, Some(routed), None).await
+    begin(state, actor, session_id, text, request_id, attachment_keys, Some(routed), None).await
+}
+
+/// The turn an earlier attempt of `request_id` created in the actor's own
+/// session, if any. Looked up BEFORE routing, so a retry replays its first
+/// attempt instead of being routed (and charged for a routing decision) again.
+pub(crate) async fn session_turn_by_request(
+    state: &ServerState,
+    actor: &OrgContext,
+    session_id: &str,
+    request_id: &str,
+) -> Result<Option<AgentTurn>, ContentError> {
+    let request_id = org::normalize_request_id(request_id).map_err(|_| ContentError::Invalid)?;
+    let tx = resources::begin(state, actor).await?;
+    owned(&tx, actor, session_id).await?;
+    let found = turn_by_request(&tx, actor.org_id, session_id, &request_id).await?;
+    session::recheck(&tx, actor, state.clock.now_unix()).await?;
+    tx.commit().await.map_err(database_error)?;
+    Ok(found)
 }
 
 #[allow(clippy::too_many_arguments)]

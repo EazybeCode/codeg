@@ -179,6 +179,8 @@ image = { version = "0.25", default-features = false, features = ["png", "webp",
 include_dir = "0.7"
 sha2 = "0.10"
 hmac = "0.12"
+# RS256 verification of Teams/Bot Framework tokens (already locked via rustls).
+ring = "0.17"
 aes-gcm = { version = "0.10", features = ["stream"] }
 argon2 = "0.5"
 tempfile = "3"

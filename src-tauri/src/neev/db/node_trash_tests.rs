@@ -72,12 +72,13 @@ async fn trash_folder(db: &DatabaseConnection, org: i32, user: i32, folder: i32)
 /// A fresh install is schema 24; these tests are about the 23 layer, so take
 /// the (empty) schema-24 sharing tables off first.
 async fn at_twenty_three(db: &DatabaseConnection) {
+    assert_eq!(downgrade_msteams(db).await, Ok(msteams_migration::Downgrade::Done));
     assert_eq!(downgrade_member_sharing(db).await, Ok(member_sharing_migration::Downgrade::Done));
     assert_eq!(version(db).await, node_trash_migration::SCHEMA_VERSION);
 }
 
 async fn fresh_is_twenty_three(db: &DatabaseConnection) {
-    assert_eq!(CURRENT_SCHEMA_VERSION, 24);
+    assert_eq!(CURRENT_SCHEMA_VERSION, 25);
     at_twenty_three(db).await;
     assert_eq!(version(db).await, node_trash_migration::SCHEMA_VERSION);
     assert!(has_table(db).await);

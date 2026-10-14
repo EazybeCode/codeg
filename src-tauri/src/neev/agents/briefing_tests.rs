@@ -353,6 +353,23 @@ async fn a_shared_thread_is_briefed_to_the_chats_audience_not_the_invokers() {
         private.contains("Alice private acquisition memo"),
         "a private session is briefed on what its owner can read"
     );
+    assert!(!private.contains("<published-answer>"));
+
+    // Her OWN session, but its answer is published to a Teams channel whose
+    // members need not belong to this organization: briefed with NOTHING from
+    // the workspace — not even organization-visible titles or the project name.
+    let published = crate::neev::agents::briefing::published();
+    assert!(!published.contains("Shared roadmap notes"), "a Team is not the organization");
+    assert!(!published.contains("Alice private acquisition memo"));
+    assert!(!private.contains("<published-answer>") && published.contains("<published-answer>"));
+    let project_name: String = crate::neev::db::one(&database, "SELECT name FROM neev_nodes WHERE id=$1", vec![project.into()])
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get("", "name")
+        .unwrap();
+    assert!(!published.contains(&project_name), "no project name");
+    assert!(!published.contains("Workspace:"), "no organization name");
 }
 
 #[tokio::test]

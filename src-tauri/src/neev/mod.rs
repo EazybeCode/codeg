@@ -19,6 +19,7 @@ pub(crate) mod library_integrations;
 #[cfg(feature = "dev-agent")]
 pub mod dev_agent;
 pub(crate) mod mail;
+pub(crate) mod msteams;
 pub(crate) mod org;
 mod startup;
 #[cfg(test)]
@@ -50,6 +51,7 @@ pub fn run_provider_schema_downgrade() -> std::process::ExitCode {
 /// The operator step the arguments name, exactly; anything else is a usage error.
 fn downgrade_step(args: &[&str]) -> Option<i64> {
     match args {
+        ["--from", "25", "--to", "24", "--confirm"] => Some(25),
         ["--from", "24", "--to", "23", "--confirm"] => Some(24),
         ["--from", "23", "--to", "22", "--confirm"] => Some(23),
         ["--from", "22", "--to", "21", "--confirm"] => Some(22),
@@ -64,7 +66,7 @@ fn downgrade_step(args: &[&str]) -> Option<i64> {
 fn run_schema_downgrade_with(args: &[&str], url: Option<String>) -> u8 {
     let Some(step) = downgrade_step(args) else {
         eprintln!(
-            "usage: neev-schema-downgrade --from 24 --to 23 --confirm\n       neev-schema-downgrade --from 23 --to 22 --confirm\n       neev-schema-downgrade --from 22 --to 21 --confirm\n       neev-schema-downgrade --from 21 --to 20 --confirm\n       neev-schema-downgrade --from 20 --to 19 --confirm"
+            "usage: neev-schema-downgrade --from 25 --to 24 --confirm\n       neev-schema-downgrade --from 24 --to 23 --confirm\n       neev-schema-downgrade --from 23 --to 22 --confirm\n       neev-schema-downgrade --from 22 --to 21 --confirm\n       neev-schema-downgrade --from 21 --to 20 --confirm\n       neev-schema-downgrade --from 20 --to 19 --confirm"
         );
         return 2;
     };
@@ -85,6 +87,9 @@ fn run_schema_downgrade_with(args: &[&str], url: Option<String>) -> u8 {
             eprintln!("neev-schema-downgrade: cannot connect");
             return 1;
         };
+        if step == 25 {
+            return teams_downgrade_exit(db::downgrade_msteams(&database).await);
+        }
         if step == 24 {
             return sharing_downgrade_exit_v24(db::downgrade_member_sharing(&database).await);
         }
@@ -120,6 +125,36 @@ fn run_schema_downgrade_with(args: &[&str], url: Option<String>) -> u8 {
             }
         }
     })
+}
+
+/// 25 -> 24 (Microsoft Teams bindings and thread ledgers). Same codes as the
+/// other steps: 0 done, 3 wrong marker, 4 Teams rows exist (refused; nothing
+/// changed — disconnect Teams deliberately first or keep 25), 1 error.
+fn teams_downgrade_exit(
+    result: Result<db::msteams_migration::Downgrade, error::AuthError>,
+) -> u8 {
+    use db::msteams_migration::Downgrade;
+    match result {
+        Ok(Downgrade::Done) => {
+            println!("downgraded schema 25 -> 24; no Teams binding or thread existed, every row preserved");
+            0
+        }
+        Ok(Downgrade::NotAtTwentyFive(version)) => {
+            println!("refused: schema is {version}, not 25; nothing changed");
+            3
+        }
+        Ok(Downgrade::TeamsDataExists { rows }) => {
+            println!(
+                "refused: {rows} Microsoft Teams binding/thread row(s) exist; nothing changed — \
+                 disconnect Teams and remove its rows deliberately first or keep schema 25"
+            );
+            4
+        }
+        Err(_) => {
+            eprintln!("neev-schema-downgrade: database error or unknown schema shape; rolled back");
+            1
+        }
+    }
 }
 
 /// 24 -> 23 (teams and member/team sharing). Same codes as the other steps: 0
@@ -247,6 +282,7 @@ mod downgrade_cli_tests {
 
     #[test]
     fn only_the_exact_operator_steps_are_accepted() {
+        assert_eq!(downgrade_step(&["--from", "25", "--to", "24", "--confirm"]), Some(25));
         assert_eq!(downgrade_step(&["--from", "24", "--to", "23", "--confirm"]), Some(24));
         assert_eq!(downgrade_step(&["--from", "23", "--to", "22", "--confirm"]), Some(23));
         assert_eq!(downgrade_step(&["--from", "22", "--to", "21", "--confirm"]), Some(22));
@@ -293,18 +329,20 @@ mod downgrade_cli_tests {
             })
         };
 
-        // A fresh install is schema 24; take the (empty) sharing and trash
-        // layers off first.
+        // A fresh install is schema 25; take the (empty) Teams, sharing and
+        // trash layers off first.
+        let teams_step = ["--from", "25", "--to", "24", "--confirm"];
         let sharing_step = ["--from", "24", "--to", "23", "--confirm"];
         let trash_step = ["--from", "23", "--to", "22", "--confirm"];
         let (url, runtime, database) = open("empty.db");
         runtime.block_on(database.clone().close()).unwrap();
+        assert_eq!(run_schema_downgrade_with(&teams_step, Some(url.clone())), 0);
         assert_eq!(run_schema_downgrade_with(&sharing_step, Some(url.clone())), 0);
         assert_eq!(run_schema_downgrade_with(&trash_step, Some(url.clone())), 0);
         assert_eq!(run_schema_downgrade_with(&step, Some(url.clone())), 0);
         assert_eq!(run_schema_downgrade_with(&step, Some(url.clone())), 3);
         let (_, runtime, database) = open("empty.db");
-        assert_eq!(version(&runtime, &database), 24, "initialize re-migrates the downgraded file");
+        assert_eq!(version(&runtime, &database), 25, "initialize re-migrates the downgraded file");
 
         let (url, runtime, database) = open("data.db");
         runtime.block_on(async {
@@ -313,11 +351,12 @@ mod downgrade_cli_tests {
             db::execute(&database, "INSERT INTO neev_knowledge_settings(org_id,capture_enabled,capture_blocked,revision,updated_by,updated_at) VALUES($1,false,NULL,1,$2,1)", vec![org.into(), user.into()]).await.unwrap();
             database.clone().close().await.unwrap();
         });
+        assert_eq!(run_schema_downgrade_with(&teams_step, Some(url.clone())), 0);
         assert_eq!(run_schema_downgrade_with(&sharing_step, Some(url.clone())), 0);
         assert_eq!(run_schema_downgrade_with(&trash_step, Some(url.clone())), 0);
         assert_eq!(run_schema_downgrade_with(&step, Some(url.clone())), 4);
         let (_, runtime, database) = open("data.db");
-        assert_eq!(version(&runtime, &database), 24);
+        assert_eq!(version(&runtime, &database), 25);
         let rows: i64 = runtime.block_on(async {
             db::one(&database, "SELECT COUNT(*) AS n FROM neev_knowledge_settings", vec![]).await.unwrap().unwrap().try_get("", "n").unwrap()
         });

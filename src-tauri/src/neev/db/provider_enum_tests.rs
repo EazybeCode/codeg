@@ -22,6 +22,7 @@ async fn version(db: &DatabaseConnection) -> i64 {
 /// (table-only, empty) schema-24, schema-23, schema-22 and schema-21 layers off
 /// first.
 async fn at_twenty(db: &DatabaseConnection) {
+    assert_eq!(downgrade_msteams(db).await, Ok(msteams_migration::Downgrade::Done));
     assert_eq!(downgrade_member_sharing(db).await, Ok(member_sharing_migration::Downgrade::Done));
     assert_eq!(downgrade_node_trash(db).await, Ok(node_trash_migration::Downgrade::Done));
     assert_eq!(

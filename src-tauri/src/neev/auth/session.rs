@@ -461,6 +461,83 @@ where
     Ok(context)
 }
 
+/// An org-scoped session for an integration client (Microsoft Teams) acting
+/// for a member it has already proved, with no browser behind it.
+///
+/// The row is an ordinary org session, so `recheck` applies to every request
+/// made with it: a disabled account, a removed membership, a role change or a
+/// revoked session refuses it exactly as it refuses a cookie. Its token and
+/// CSRF secrets are random, hashed and DISCARDED — the session can never be
+/// presented by anyone; only the returned context can use it.
+pub(crate) async fn issue_delegated(
+    database: &DatabaseConnection,
+    user_id: UserId,
+    org_id: OrgId,
+    now: i64,
+    ttl: i64,
+) -> Result<OrgContext, AuthError> {
+    if now < 0 || !(60..=ORGANIZATION_TTL).contains(&ttl) {
+        return Err(AuthError::Invalid);
+    }
+    let expires_at = now.checked_add(ttl).ok_or(AuthError::Invalid)?;
+    let session_hash = secrets::digest(
+        TokenPurpose::Session,
+        &secrets::random_token(TokenPurpose::Session)?,
+    )?;
+    let csrf_hash = secrets::digest(TokenPurpose::Csrf, &secrets::random_token(TokenPurpose::Csrf)?)?;
+    let id = uuid::Uuid::new_v4().to_string();
+    let tx = db::begin(database).await?;
+    let account = lock_account(&tx, user_id).await?;
+    let organization = lock_organization(&tx, org_id).await?;
+    let membership = lock_membership(&tx, org_id, user_id).await?;
+    db::execute(
+        &tx,
+        "INSERT INTO neev_sessions(id,token_hash,csrf_hash,user_id,account_revision,org_id,member_id,member_revision,org_revision,authenticated_at,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
+        vec![
+            id.clone().into(), session_hash.into(), csrf_hash.into(), user_id.into(),
+            account.auth_revision.into(), org_id.into(), membership.id.into(),
+            membership.revision.into(), organization.revision.into(), now.into(),
+            expires_at.into(),
+        ],
+    )
+    .await?;
+    let context = OrgContext {
+        identity: IdentityContext {
+            user_id,
+            session_id: id,
+            auth_revision: account.auth_revision,
+            authenticated_at: now,
+        },
+        org_id,
+        member_id: membership.id,
+        member_revision: membership.revision,
+        org_revision: organization.revision,
+        role: role(&membership.role)?,
+    };
+    recheck(&tx, &context, now).await?;
+    tx.commit().await.map_err(database_error)?;
+    Ok(context)
+}
+
+/// Read-only: the account is enabled and an active member of the org right
+/// now. For an integration that re-authorizes a DELIVERY (not a request): it
+/// creates no session row, so a retried delivery adds nothing to storage.
+pub(crate) async fn member_active(
+    database: &DatabaseConnection,
+    user_id: UserId,
+    org_id: OrgId,
+) -> Result<(), AuthError> {
+    let tx = db::begin(database).await?;
+    let account = lock_account(&tx, user_id).await?;
+    if account.disabled {
+        return Err(AuthError::Forbidden);
+    }
+    lock_organization(&tx, org_id).await?;
+    lock_membership(&tx, org_id, user_id).await?;
+    tx.commit().await.map_err(database_error)?;
+    Ok(())
+}
+
 pub(crate) async fn select_organization(
     database: &DatabaseConnection,
     identity: &IdentityContext,

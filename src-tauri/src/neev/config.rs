@@ -283,6 +283,9 @@ pub(crate) struct Config {
     pub(crate) routing: RoutingConfig,
     /// Supervision of complex Auto turns. Off unless `NEEV_SUPERVISION` is set.
     pub(crate) supervision: SupervisionConfig,
+    /// Microsoft Teams client layer. `None` unless `NEEV_TEAMS_ENABLED=true`
+    /// with a complete bot credential and mapping file (see `msteams::config`).
+    pub(crate) teams: Option<super::msteams::config::TeamsConfig>,
     #[cfg(test)]
     pub(crate) _document_root_guard: Option<tempfile::TempDir>,
     #[cfg(test)]
@@ -291,7 +294,14 @@ pub(crate) struct Config {
 
 impl Config {
     pub(crate) fn from_env() -> Result<Self, ConfigError> {
-        const KEYS: [&str; 34] = [
+        const KEYS: [&str; 41] = [
+            "NEEV_TEAMS_ENABLED",
+            "NEEV_TEAMS_BOT_APP_ID",
+            "NEEV_TEAMS_BOT_TENANT_ID",
+            "NEEV_TEAMS_BOT_CLIENT_SECRET",
+            "NEEV_TEAMS_MAPPING_FILE",
+            "NEEV_TEAMS_SERVICE_URL_HOSTS",
+            "NEEV_TEAMS_TAB_APP_ID_URI",
             "NEEV_SUPERVISION",
             "NEEV_SUPERVISOR_MODEL",
             "NEEV_SUPERVISOR_EFFORT",
@@ -452,7 +462,13 @@ impl Config {
         };
         let routing = routing(values)?;
         let supervision = supervision(values)?;
+        // The reason names the key or mapping rule only, never a value.
+        let teams = super::msteams::config::teams(values).map_err(|error| {
+            tracing::error!(%error, "Microsoft Teams configuration rejected");
+            ConfigError::Provider
+        })?;
         Ok(Self {
+            teams,
             engine,
             knowledge_root,
             routing,

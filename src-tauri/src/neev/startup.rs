@@ -766,6 +766,19 @@ async fn serve() -> Result<(), ()> {
             }
         });
     }
+    // Microsoft Teams: the worker that carries the durable inbox to runs and
+    // delivers the outbox, resuming whatever a previous process left. Only when
+    // Teams is enabled; a runtime that cannot be built is a startup failure
+    // rather than an endpoint that accepts messages nothing will deliver.
+    if let Some(teams) = state.config.teams.as_ref() {
+        match crate::neev::msteams::runtime(teams) {
+            Some(runtime) => crate::neev::msteams::worker::spawn(state.clone(), runtime),
+            None => {
+                eprintln!("Neev Teams runtime could not be built (HTTP client)");
+                return Err(());
+            }
+        }
+    }
     // The supervisor lifecycle must not depend on anyone polling.
     //
     // Without this, a user who approves a sign-in and closes the tab is never

@@ -33,8 +33,12 @@ mod knowledge;
 #[cfg(test)]
 mod knowledge_tests;
 mod static_files;
+mod teams;
 #[cfg(test)]
 mod tests;
+
+/// The saved-session turn launcher, shared with integration clients (Teams).
+pub(in crate::neev) use agent_sessions::{launch_session_turn, LaunchAudience};
 
 const REFERRER_POLICY: HeaderName = HeaderName::from_static("referrer-policy");
 
@@ -477,6 +481,26 @@ pub(crate) fn router(state: Arc<ServerState>) -> Router {
     // route disappears, the capability reports false, clients poll. No data change.
     if state.config.realtime_enabled {
         router = router.route("/api/neev/chats/{id}/stream", get(realtime::stream));
+    }
+    // Microsoft Teams (`msteams`): mounted only when `NEEV_TEAMS_ENABLED=true`
+    // with a complete configuration. The bot endpoint path is the one entered
+    // as the Azure Bot's messaging endpoint.
+    if let Some(teams_config) = state.config.teams.as_ref() {
+        router = router
+            .route("/api/teams/messages", post(teams::messages))
+            // Admin-managed bindings (schema 25) and a member's own link.
+            .route("/api/neev/teams/bindings", get(teams::admin_bindings))
+            .route("/api/neev/teams/bindings/tenant", post(teams::admin_connect))
+            .route("/api/neev/teams/bindings/tenant/state", post(teams::admin_tenant_state))
+            .route("/api/neev/teams/bindings/team", post(teams::admin_link_team))
+            .route("/api/neev/teams/bindings/team/state", post(teams::admin_team_state))
+            .route("/api/neev/teams/bindings/channel", post(teams::admin_channel))
+            .route("/api/neev/teams/unlink", post(teams::unlink));
+        if teams_config.tab_app_id_uri.is_some() {
+            router = router
+                .route("/api/neev/teams/tab/status", get(teams::tab_status))
+                .route("/api/neev/teams/link", post(teams::link));
+        }
     }
     if state.config.gateway_events {
         router = router.route(

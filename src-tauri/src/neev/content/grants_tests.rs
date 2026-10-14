@@ -734,6 +734,11 @@ async fn restricted_folders_hide_and_redact(w: &World) {
     assert!(crate::neev::knowledge::access::is_eligible(&w.db, w.org, &deep_doc.id).await.unwrap().is_some());
     // Downgrade refuses while a restriction (or any share) exists.
     restrict(w, &w.creator, w.folder, true).await.unwrap();
+    // (The empty schema-25 Teams layer comes off first; it is not under test.)
+    assert_eq!(
+        crate::neev::db::downgrade_msteams(&w.db).await,
+        Ok(crate::neev::db::msteams_migration::Downgrade::Done)
+    );
     assert!(matches!(
         crate::neev::db::downgrade_member_sharing(&w.db).await,
         Ok(crate::neev::db::member_sharing_migration::Downgrade::SharingExists { .. })

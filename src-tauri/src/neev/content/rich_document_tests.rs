@@ -92,7 +92,13 @@ async fn mixed_history(database: sea_orm::DatabaseConnection) {
     let historical_charge = h.usage("charged_bytes").await;
     // Schema 22 (org knowledge) is newest: its tables go first, children first.
     // Schema 23's trash ledger is newer still, so it comes off first.
-    // Schema 24's sharing tables are newer still.
+    // Schema 24's sharing tables are newer still, and schema 25's Teams tables
+    // newest of all.
+    for table in crate::neev::db::msteams_migration::DROP_ORDER {
+        crate::neev::db::execute(&h.state.database, &format!("DROP TABLE {table}"), vec![])
+            .await
+            .unwrap();
+    }
     for table in ["neev_restricted_nodes", "neev_shared_marks", "neev_grants", "neev_team_members", "neev_teams"] {
         crate::neev::db::execute(&h.state.database, &format!("DROP TABLE {table}"), vec![])
             .await

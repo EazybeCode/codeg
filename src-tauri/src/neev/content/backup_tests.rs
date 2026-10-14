@@ -316,7 +316,13 @@ async fn downgrade_snapshot(database: &DatabaseConnection, schema_version: i64) 
     // newer than every inventory this fixture rebuilds; 20 only widened a
     // CHECK, which older markers tolerate.
     // Schema 23's trash ledger is newest of all; it goes first.
-    // Schema 24's sharing tables are newer still; they go before it.
+    // Schema 24's sharing tables are newer still; they go before it, and
+    // schema 25's Teams tables before those.
+    for table in db::msteams_migration::DROP_ORDER {
+        db::execute(database, &format!("DROP TABLE IF EXISTS {table}"), vec![])
+            .await
+            .unwrap();
+    }
     for table in ["neev_restricted_nodes", "neev_shared_marks", "neev_grants", "neev_team_members", "neev_teams"] {
         db::execute(database, &format!("DROP TABLE IF EXISTS {table}"), vec![])
             .await
