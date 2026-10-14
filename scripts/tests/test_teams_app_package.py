@@ -72,8 +72,19 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(manifest["bots"][0]["scopes"], ["personal", "team"])
         self.assertEqual(manifest["validDomains"], ["neev.example.com"])
         self.assertEqual(manifest["developer"]["privacyUrl"], BASE + "/privacy")
-        self.assertNotIn("webApplicationInfo", manifest)
+        self.assertEqual(manifest["webApplicationInfo"], {"id": BOT, "resource": BASE})
         self.assertNotIn("staticTabs", manifest)
+
+    def test_team_manifest_declares_narrow_graph_rsc_permissions(self):
+        manifest = pkg.build_manifest(bot_app_id=BOT, base_url=BASE)
+        self.assertEqual(manifest["webApplicationInfo"]["id"], BOT)
+        self.assertEqual(
+            manifest["authorization"]["permissions"]["resourceSpecific"],
+            [
+                {"name": "TeamMember.Read.Group", "type": "Application"},
+                {"name": "ChannelSettings.Read.Group", "type": "Application"},
+            ],
+        )
 
     def test_tab_sso_and_static_tab_are_opt_in(self):
         uri = f"api://neev.example.com/botid-{BOT}"

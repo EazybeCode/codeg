@@ -44,6 +44,10 @@ GUID = re.compile(
 )
 SEMVER = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 ACCENT = "#1F6FEB"
+TEAM_RSC_PERMISSIONS = [
+    {"name": "TeamMember.Read.Group", "type": "Application"},
+    {"name": "ChannelSettings.Read.Group", "type": "Application"},
+]
 # A zip entry's fixed timestamp keeps the package byte-for-byte reproducible.
 ZIP_TIME = (2026, 1, 1, 0, 0, 0)
 
@@ -166,6 +170,10 @@ def build_manifest(
             }
         ],
         "permissions": ["identity"],
+        # RSC binds consent to this Entra application even without a tab/SSO.
+        # The resource is informational for RSC; SSO overrides it below.
+        "webApplicationInfo": {"id": bot_app_id, "resource": base},
+        "authorization": {"permissions": {"resourceSpecific": [dict(p) for p in TEAM_RSC_PERMISSIONS]}},
         "validDomains": [host],
     }
     if tab_app_id_uri:
