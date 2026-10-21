@@ -45,6 +45,7 @@ export const NEEV_ATTACHMENT_TYPES = [
   "image/jpeg",
   "image/webp",
   "application/pdf",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   "text/plain",
 ] as const
 export type NeevAttachmentType = (typeof NEEV_ATTACHMENT_TYPES)[number]
@@ -121,6 +122,16 @@ export function sniffAttachment(bytes: Uint8Array): NeevAttachmentType | null {
   }
 }
 
+function hasDocxZipSignature(bytes: Uint8Array): boolean {
+  return (
+    bytes.length >= 4 &&
+    bytes[0] === 0x50 &&
+    bytes[1] === 0x4b &&
+    bytes[2] === 0x03 &&
+    bytes[3] === 0x04
+  )
+}
+
 /**
  * The name the server will store this under, or `null` if it would refuse it.
  *
@@ -168,7 +179,13 @@ export async function classifyFile(
   file: File
 ): Promise<NeevAttachmentType | null> {
   if (file.size === 0) return null
-  const magic = sniffAttachment(await readBytes(file.slice(0, 12)))
+  const header = await readBytes(file.slice(0, 12))
+  // The browser cannot cheaply inspect the ZIP central directory. This is an
+  // advisory check only; the server validates `word/document.xml` before
+  // storing the file, so a renamed ZIP still cannot enter the system.
+  if (file.name.toLowerCase().endsWith(".docx") && hasDocxZipSignature(header))
+    return "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+  const magic = sniffAttachment(header)
   if (magic !== null && magic !== "text/plain") return magic
   return sniffAttachment(await readBytes(file))
 }

@@ -17,6 +17,8 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::neev::content::attachment;
+
 /// Fixed, sanitized execution failure categories.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ExecutionError {
@@ -280,7 +282,7 @@ fn stage_files(
     // Explicit, for the same reason as the files: `create_dir` is umask-masked.
     std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o755))
         .map_err(|_| ExecutionError::Unavailable)?;
-    let mut staged = Vec::with_capacity(attachments.len());
+    let mut staged = Vec::with_capacity(attachments.len() * 2);
     for attachment in attachments {
         // Re-prove the name is one ordinary path segment. Anything else — a
         // separator, `..`, an absolute path — is refused rather than repaired.
@@ -319,6 +321,39 @@ fn stage_files(
             file_name: attachment.file_name.clone(),
             is_image: attachment.is_image,
         });
+
+        // Providers can read ordinary text files but do not consistently parse
+        // DOCX ZIP containers. Keep the original upload for download/history and
+        // add a bounded, server-extracted companion that every provider can read.
+        if attachment::sniff_attachment(&attachment.bytes) == Some(attachment::DOCX_CONTENT_TYPE) {
+            if let Some(text) = attachment::extract_docx_text(&attachment.bytes) {
+                let companion_name = format!("{}.txt", attachment.file_name);
+                let companion_key = format!("{}-text", attachment.key);
+                let companion_path = directory.join(staged_leaf(&companion_key, &companion_name));
+                let mut companion = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .custom_flags(libc::O_NOFOLLOW)
+                    .mode(0o644)
+                    .open(&companion_path)
+                    .map_err(|_| ExecutionError::Unavailable)?;
+                companion
+                    .write_all(text.as_bytes())
+                    .and_then(|_| companion.write_all(b"\n"))
+                    .map_err(|_| ExecutionError::Unavailable)?;
+                companion.sync_all().map_err(|_| ExecutionError::Unavailable)?;
+                std::fs::set_permissions(
+                    &companion_path,
+                    std::fs::Permissions::from_mode(0o644),
+                )
+                .map_err(|_| ExecutionError::Unavailable)?;
+                staged.push(StagedAttachment {
+                    path: companion_path.to_string_lossy().into_owned(),
+                    file_name: companion_name,
+                    is_image: false,
+                });
+            }
+        }
     }
     Ok(staged)
 }
@@ -412,6 +447,11 @@ fn prompt_with_attachments(prompt: &str, staged: &[StagedAttachment]) -> String 
     for item in staged {
         block.push_str(&item.path);
         block.push('\n');
+    }
+    if staged.iter().any(|item| item.file_name.ends_with(".docx.txt")) {
+        block.push_str(
+            "DOCX text companions end in `.docx.txt`; read those companions first, then use the original `.docx` when layout or embedded media matters.\n",
+        );
     }
     block.push_str("</attached-files>\n\n");
     format!("{block}{prompt}")
@@ -3763,6 +3803,51 @@ mod tests {
         assert!(prompt.contains(&staged[0].path));
         assert!(prompt.contains(&staged[1].path));
         assert!(prompt.ends_with("look"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn docx_attachments_are_staged_with_a_readable_text_companion() {
+        use std::io::Write;
+        let root = std::env::temp_dir().join(format!(
+            "neev-stage-docx-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let mut bytes = Vec::new();
+        let mut archive = zip::ZipWriter::new(std::io::Cursor::new(&mut bytes));
+        archive
+            .start_file("word/document.xml", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        archive
+            .write_all(
+                br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Neev DOCX smoke test</w:t></w:r></w:p></w:body></w:document>"#,
+            )
+            .unwrap();
+        archive.finish().unwrap();
+        let attachments = vec![RunAttachment {
+            key: "11111111-1111-4111-8111-111111111111".into(),
+            file_name: "onboarding.docx".into(),
+            bytes,
+            is_image: false,
+        }];
+        let staged = stage_attachments(&root, &attachments).expect("DOCX stages");
+        assert_eq!(staged.len(), 2);
+        let companion = staged
+            .iter()
+            .find(|item| item.file_name == "onboarding.docx.txt")
+            .expect("DOCX text companion is staged");
+        assert_eq!(
+            std::fs::read_to_string(&companion.path).unwrap(),
+            "Neev DOCX smoke test\n"
+        );
+        let prompt = prompt_with_attachments("summarize", &staged);
+        assert!(prompt.contains("DOCX text companion"));
+        assert!(prompt.contains(&companion.path));
         std::fs::remove_dir_all(&root).ok();
     }
 

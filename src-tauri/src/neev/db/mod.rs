@@ -349,6 +349,22 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
         let version = markers[0]
             .try_get::<i64>("", "version")
             .map_err(database_error)?;
+
+        // DOCX support widens the existing attachment content-type CHECK. It
+        // has no table inventory change, so apply it before validating any
+        // schema that already contains the attachment tables.
+        if names == v15_expected
+            || names == v16_expected
+            || names == v17_expected
+            || names == v18_expected
+            || names == v19_expected
+            || names == v21_expected
+            || names == v22_expected
+            || names == v23_expected
+            || names == v24_expected
+        {
+            attachment_migration::allow_docx_content_type(&tx).await?;
+        }
         // Each arm advances to the status7 state; the shared tail then performs
         // the additive gateway8 upgrade and publishes marker8 exactly once. The
         // exact8 arm validates in place and preserves every row.

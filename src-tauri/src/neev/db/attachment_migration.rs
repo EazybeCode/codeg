@@ -54,8 +54,12 @@ const CONTENT_TYPES: &[&str] = &[
     "image/jpeg",
     "image/webp",
     "application/pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     "text/plain",
 ];
+
+const DOCX_CONTENT_TYPE: &str =
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
 fn tables() -> Vec<TableCreateStatement> {
     let mut blobs = Table::create();
@@ -320,6 +324,145 @@ pub(super) async fn upgrade(tx: &DatabaseTransaction) -> Result<(), AuthError> {
     // Same discipline as every migration before it: publish nothing that fails
     // its own validator.
     validate(tx).await
+}
+
+/// Add DOCX to the attachment content-type CHECK on databases created before
+/// DOCX support. This is deliberately idempotent and runs without changing the
+/// schema marker: it only widens an existing constraint and preserves every row.
+pub(super) async fn allow_docx_content_type(
+    tx: &DatabaseTransaction,
+) -> Result<(), AuthError> {
+    match tx.get_database_backend() {
+        DbBackend::Postgres => allow_docx_postgres(tx).await,
+        DbBackend::Sqlite => allow_docx_sqlite(tx).await,
+        _ => Err(AuthError::Unavailable),
+    }
+}
+
+async fn allow_docx_postgres(tx: &DatabaseTransaction) -> Result<(), AuthError> {
+    let relid = "(SELECT c.oid FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE c.relname='neev_attachments' AND n.nspname=current_schema())";
+    let Some(row) = super::one(
+        tx,
+        &format!(
+            "SELECT conname,pg_get_constraintdef(oid) AS definition FROM pg_constraint WHERE conrelid={relid} AND contype='c' AND pg_get_constraintdef(oid) LIKE '%content_type%' LIMIT 1"
+        ),
+        vec![],
+    )
+    .await?
+    else {
+        return Err(AuthError::Unavailable);
+    };
+    let definition: String = row
+        .try_get("", "definition")
+        .map_err(database_error)?;
+    if definition.contains(DOCX_CONTENT_TYPE) {
+        return Ok(());
+    }
+    let name: String = row.try_get("", "conname").map_err(database_error)?;
+    let quoted = name.replace('"', "\"\"");
+    super::execute(
+        tx,
+        &format!("ALTER TABLE neev_attachments DROP CONSTRAINT \"{quoted}\""),
+        vec![],
+    )
+    .await?;
+    let types = CONTENT_TYPES
+        .iter()
+        .map(|value| format!("'{value}'"))
+        .collect::<Vec<_>>()
+        .join(",");
+    super::execute(
+        tx,
+        &format!(
+            "ALTER TABLE neev_attachments ADD CONSTRAINT neev_attachments_content_type CHECK (content_type IN ({types}))"
+        ),
+        vec![],
+    )
+    .await?;
+    Ok(())
+}
+
+async fn allow_docx_sqlite(tx: &DatabaseTransaction) -> Result<(), AuthError> {
+    let ddl: String = super::one(
+        tx,
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='neev_attachments'",
+        vec![],
+    )
+    .await?
+    .ok_or(AuthError::Unavailable)?
+    .try_get("", "sql")
+    .map_err(database_error)?;
+    if ddl.contains(DOCX_CONTENT_TYPE) {
+        return Ok(());
+    }
+    let old_types = "'application/pdf','text/plain'";
+    if !ddl.contains(old_types) {
+        return Err(AuthError::Unavailable);
+    }
+    let index_rows = tx
+        .query_all(super::statement(
+            tx,
+            "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name='neev_attachments' AND sql IS NOT NULL",
+            vec![],
+        ))
+        .await
+        .map_err(database_error)?;
+    let index_ddls: Vec<String> = index_rows
+        .iter()
+        .map(|row| row.try_get("", "sql").map_err(database_error))
+        .collect::<Result<_, _>>()?;
+    let rebuilt = ddl
+        .replacen("neev_attachments", "neev_attachments_new", 1)
+        .replace(
+            old_types,
+            &format!(
+                "'application/pdf','{DOCX_CONTENT_TYPE}','text/plain'"
+            ),
+        );
+    super::execute(
+        tx,
+        "CREATE TEMP TABLE neev_attachment_refs_docx_migration AS SELECT * FROM neev_attachment_refs",
+        vec![],
+    )
+    .await?;
+    super::execute(tx, "PRAGMA defer_foreign_keys=ON", vec![]).await?;
+    super::execute(tx, &rebuilt, vec![]).await?;
+    super::execute(
+        tx,
+        "INSERT INTO neev_attachments_new SELECT * FROM neev_attachments",
+        vec![],
+    )
+    .await?;
+    super::execute(tx, "DROP TABLE neev_attachments", vec![]).await?;
+    super::execute(
+        tx,
+        "ALTER TABLE neev_attachments_new RENAME TO neev_attachments",
+        vec![],
+    )
+    .await?;
+    super::execute(
+        tx,
+        "INSERT INTO neev_attachment_refs SELECT * FROM neev_attachment_refs_docx_migration",
+        vec![],
+    )
+    .await?;
+    super::execute(
+        tx,
+        "DROP TABLE neev_attachment_refs_docx_migration",
+        vec![],
+    )
+    .await?;
+    for index in index_ddls {
+        super::execute(tx, &index, vec![]).await?;
+    }
+    if super::one(tx, "PRAGMA foreign_key_check", vec![])
+        .await?
+        .is_some()
+    {
+        return Err(AuthError::Unavailable);
+    }
+    super::execute(tx, "PRAGMA defer_foreign_keys=OFF", vec![]).await?;
+    Ok(())
 }
 
 fn canonical_hash(value: &str) -> bool {
