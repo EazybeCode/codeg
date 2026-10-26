@@ -12,10 +12,10 @@ do not exist on `main`.
 | Application / release branch | `teams/client-layer-oct12` |
 | Default branch | `main`: upstream baseline plus this handover |
 | Live app | `https://app.neev.so` |
-| Live source commit | `160a45bca3a09e7b644d776f40651904ec14dc93` |
-| Live image tag | `neev-native-agent:teams-160a45bc` |
+| Live source commit | `085c3f16990710c570421cb959ef08a8bfdacd91` |
+| Live image tag | `neev-native-agent:prod-085c3f16` |
 | Database schema | The deployed Teams release uses schema 25; confirm on the host before a swap. |
-| Pending release | DOCX support (`62741f62`), Teams package permissions (`c19a5935`), and Docker build-context corrections are being consolidated onto the release branch. Verify the remote tip; do not assume they are live. |
+| Verified release | DOCX support, Teams package permissions, and build-context corrections were published and deployed on 2026-10-26. Later handover-only commits do not change the deployed application code. |
 
 The original clone also has a `workos` remote for `EazybeCode/neev`. That is
 not this publication's target. The surrounding Conductor workspace belongs
@@ -24,9 +24,9 @@ to `sagardewan/new-idea`, a separate planning repository.
 On the owner's Mac, the persistent application checkout is
 `~/conductor/workspaces/new-idea-v1/rio-de-janeiro/.context/teams-oct12-src`.
 The sibling `hosted-oct8-src` has 21 dirty files: applying those changes
-three-way onto the prepared DOCX commit produced no additional delta. Keep
-that checkout until publication is verified; do not overwrite the newer Teams
-schema files with its older versions. The former `/tmp/neev-deploy-20261022`
+three-way onto the prepared DOCX commit produced no additional delta. Publication
+and deployment are verified; the older checkout has been retained. Do not overwrite
+the newer Teams schema files with its older versions. The former `/tmp/neev-deploy-20261022`
 worktree is gone, but its DOCX commit survives in local Git.
 
 ## Product direction
@@ -74,7 +74,7 @@ editing an operator screen can leave the hosted native UI unchanged.
 
 Use Node 22, Corepack and the pnpm version from `package.json`. Release builds
 use the Rust toolchain pinned in the native Dockerfile. From the application
-branch, focused checks for the pending release are:
+branch, focused checks for this release are:
 
 ```bash
 corepack pnpm install --frozen-lockfile
@@ -105,8 +105,11 @@ intentionally block startup; `neev-server --help` is not a health check.
    is `~/eazybe-wiki/scripts/ship`. Code changes need the developer's terminal
    interview; do not invent answers or bypass the hook. Documentation-only
    changes follow the workflow's no-interview path.
-4. Verify the remote commit after publication. Build native base/agent images
-   from an exact, secret-scanned Git archive. The frontend build needs the
+4. Verify the remote commit after publication. Build from an exact, secret-scanned
+   Git archive. Production contains additional ACP and browser tools beyond the
+   generic agent Dockerfile: preserve those runtime layers and configuration
+   while replacing the app binaries and frontend. Verify runtime parity.
+   The frontend build needs the
    extension's `signin.js`; the agent context needs operations scripts, MCP
    manifests, and the response-style file.
 5. Before deployment check schema, active runs/sign-ins, a verified database
@@ -128,17 +131,41 @@ Observed host paths for an authorized operator:
   `/var/lib/neev-native/knowledge`. These are not cache-cleanup targets.
 
 The previous Teams deploy script performs a schema 24-to-25 migration. Do not
-rerun it unchanged against schema 25. A DOCX candidate image was built but was
-not deployed as of this handover. Review any prepared swap script, including
-release-state updates and rollback, before executing it. A branch name or a
-successful push does not imply automatic deployment.
+rerun it unchanged against schema 25. Publishing to GitHub does not automatically
+deploy the app.
+
+### 2026-10-26 deployment evidence and migration caveat
+
+The live image is `sha256:10cc79c898665911b0e33996db9fb570eebc396f34e5b120c9a9816232d6f9cf`.
+Evidence is under `/opt/neev-release-085c3f16/`: `image.json`, `canary.json`,
+`deploy-result.json`, and the deployment scripts. The release record independently
+matches source `085c3f16`; health and frontend/backend hashes were verified.
+
+The restored-database canary verified data preservation, the DOCX CHECK change,
+restart idempotency, and rollback before DOCX writes. A fresh production backup
+was verified immediately before the image swap. Runtime environment, mounts,
+security settings, agent/browser tools, Teams, and the originals broker were preserved.
+
+Authenticated live acceptance also passed in a private QA chat: a synthetic DOCX
+uploaded successfully, the connected Codex agent read its text companion and
+returned the exact verification code and total, and a later turn reread the same
+attachment and returned both item quantities. Both turns completed in six seconds.
+
+**Important source gap:** in `src-tauri/src/neev/db/mod.rs`, the call to
+`allow_docx_content_type` includes inventories through `v24_expected` but omits
+`v25_expected`. The canary caught this. This deployment explicitly applied the
+same MIME expansion using the guarded, idempotent `docx-schema25.sql` in the
+release evidence directory. Production is corrected and stays at schema 25.
+A future code change should add schema25 to that startup gate and include a
+regression test against a pre-DOCX schema25 database. Another existing schema25
+installation needs the same explicit migration until that fix is published.
+
+Do not roll back to a pre-DOCX binary after DOCX rows have been accepted; the
+previous validator does not support them. Preserve the files and use forward
+recovery. The deployed script only auto-rolls back while no DOCX rows exist.
 
 ## Remaining work
 
-- **Publish/deploy:** verify the consolidated release on GitHub, then use a
-  guarded live swap that preserves Teams.
-- **DOCX acceptance:** upload a real DOCX in the browser, ask an agent to use
-  its extracted text, and verify later turns retain access.
 - **Reliability/OpenUI:** the approved design is
   `docs/superpowers/specs/2026-10-16-neev-reliability-openui-design.md`.
   It is a design, not proof of implementation. Audit each requirement before

@@ -15,10 +15,10 @@ the app. It covers the architecture, setup, tests, deployment, and remaining wor
 | `main` | GitHub default branch, upstream baseline, and this handover. It is **not** the source of the currently deployed Neev app. |
 
 The deployment checked on **2026-10-26** runs commit
-[`160a45bc`](https://github.com/EazybeCode/codeg/commit/160a45bca3a09e7b644d776f40651904ec14dc93)
-from `teams/client-layer-oct12`. Newer local work is being consolidated onto
-that release branch. Publishing to GitHub and deploying are separate steps;
-verify both before saying a change is live.
+[`085c3f16`](https://github.com/EazybeCode/codeg/commit/085c3f16990710c570421cb959ef08a8bfdacd91)
+from `teams/client-layer-oct12`. This release is pushed and deployed, including
+DOCX support. Later handover-only commits do not change the running application
+code. See the guide for the schema25 migration caveat and remaining acceptance work.
 
 For a fresh application checkout:
 
