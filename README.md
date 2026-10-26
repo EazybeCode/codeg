@@ -1,3 +1,5 @@
+> **Neev maintainers:** Start with [docs/NEEV-HANDOVER.md](docs/NEEV-HANDOVER.md). It identifies the deployed branch, native runtime, verification steps, and pending work.
+
 # Codeg
 
 [![Release](https://img.shields.io/github/v/release/xintaofei/codeg)](https://github.com/xintaofei/codeg/releases)

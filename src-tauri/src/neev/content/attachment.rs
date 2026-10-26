@@ -13,6 +13,11 @@ use crate::neev::{db, error::database_error, startup::ServerState, types::OrgCon
 use sea_orm::ConnectionTrait;
 use uuid::Uuid;
 
+pub(crate) const DOCX_CONTENT_TYPE: &str =
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+const MAX_DOCX_XML_BYTES: usize = 8 * 1024 * 1024;
+const MAX_DOCX_TEXT_BYTES: usize = 4 * 1024 * 1024;
+
 /// Per-tenant storage bounds, enforced race-safe under the admission guard.
 ///
 /// `pub(crate)` because it is the bound a run's carried-context set is measured
@@ -141,11 +146,97 @@ pub(crate) fn sniff_attachment(bytes: &[u8]) -> Option<&'static str> {
         Some("image/webp")
     } else if bytes.starts_with(b"%PDF-") {
         Some("application/pdf")
+    } else if is_docx_archive(bytes) {
+        Some(DOCX_CONTENT_TYPE)
     } else if std::str::from_utf8(bytes).is_ok() && !bytes.contains(&0) {
         Some("text/plain")
     } else {
         None
     }
+}
+
+/// A DOCX is a ZIP package, but a generic ZIP is not a Word document. Requiring
+/// the main WordprocessingML part keeps the content classifier strict while
+/// still accepting documents whose browser MIME type is empty or incorrect.
+fn is_docx_archive(bytes: &[u8]) -> bool {
+    if !bytes.starts_with(b"PK\x03\x04") {
+        return false;
+    }
+    let Ok(mut archive) = zip::ZipArchive::new(std::io::Cursor::new(bytes)) else {
+        return false;
+    };
+    let present = archive.by_name("word/document.xml").is_ok();
+    present
+}
+
+/// Extract the readable body of a DOCX without executing or unpacking anything
+/// else from the archive. Only `word/document.xml` is read; relationships,
+/// embedded objects and macros never cross this boundary.
+pub(crate) fn extract_docx_text(bytes: &[u8]) -> Option<String> {
+    use std::io::Read;
+
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).ok()?;
+    let mut document = archive.by_name("word/document.xml").ok()?;
+    if document.size() > MAX_DOCX_XML_BYTES as u64 {
+        return None;
+    }
+    let mut xml = Vec::with_capacity(document.size() as usize);
+    document.read_to_end(&mut xml).ok()?;
+
+    let mut reader = quick_xml::Reader::from_reader(xml.as_slice());
+    reader.config_mut().trim_text(false);
+    let mut buffer = Vec::new();
+    let mut in_text = false;
+    let mut text = String::new();
+    loop {
+        match reader.read_event_into(&mut buffer).ok()? {
+            quick_xml::events::Event::Start(event) => {
+                let name = event.name();
+                if name.as_ref() == b"w:t" {
+                    in_text = true;
+                } else if name.as_ref() == b"w:br" {
+                    push_docx_text(&mut text, "\n")?;
+                }
+            }
+            quick_xml::events::Event::Empty(event) => match event.name().as_ref() {
+                b"w:tab" => push_docx_text(&mut text, "\t")?,
+                b"w:br" => push_docx_text(&mut text, "\n")?,
+                _ => {}
+            },
+            quick_xml::events::Event::Text(event) if in_text => {
+                let decoded = event.decode().ok()?;
+                let value = quick_xml::escape::unescape(decoded.as_ref()).ok()?;
+                push_docx_text(&mut text, &value)?;
+            }
+            quick_xml::events::Event::CData(event) if in_text => {
+                let value = std::str::from_utf8(event.as_ref()).ok()?;
+                push_docx_text(&mut text, value)?;
+            }
+            quick_xml::events::Event::End(event) => match event.name().as_ref() {
+                b"w:t" => in_text = false,
+                b"w:p" => {
+                    if !text.ends_with('\n') {
+                        push_docx_text(&mut text, "\n")?;
+                    }
+                }
+                _ => {}
+            },
+            quick_xml::events::Event::Eof => break,
+            _ => {}
+        }
+        buffer.clear();
+    }
+
+    let text = text.trim_end_matches('\n').to_owned();
+    (!text.trim().is_empty()).then_some(text)
+}
+
+fn push_docx_text(output: &mut String, value: &str) -> Option<()> {
+    if output.len().saturating_add(value.len()) > MAX_DOCX_TEXT_BYTES {
+        return None;
+    }
+    output.push_str(value);
+    Some(())
 }
 
 /// The name an attachment is stored and staged under.
@@ -420,6 +511,7 @@ fn read_stored(row: &sea_orm::QueryResult) -> Result<StoredAttachment, ContentEr
         "image/jpeg" => "image/jpeg",
         "image/webp" => "image/webp",
         "application/pdf" => "application/pdf",
+        DOCX_CONTENT_TYPE => DOCX_CONTENT_TYPE,
         "text/plain" => "text/plain",
         _ => return Err(ContentError::Storage),
     };

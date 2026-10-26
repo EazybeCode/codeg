@@ -23,6 +23,27 @@ fn pdf() -> Vec<u8> {
     bytes
 }
 
+fn docx() -> Vec<u8> {
+    use std::io::Write;
+    let mut bytes = Vec::new();
+    let mut archive = zip::ZipWriter::new(std::io::Cursor::new(&mut bytes));
+    let options = zip::write::SimpleFileOptions::default();
+    archive.start_file("word/document.xml", options).unwrap();
+    archive
+        .write_all(
+            br#"<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p><w:r><w:t>Neev DOCX smoke test</w:t></w:r></w:p>
+    <w:p><w:r><w:t>Sales team onboarding document.</w:t></w:r></w:p>
+  </w:body>
+</w:document>"#,
+        )
+        .unwrap();
+    archive.finish().unwrap();
+    bytes
+}
+
 async fn chat(harness: &Harness) -> Resource {
     resources::create(
         &harness.state,
@@ -39,6 +60,14 @@ fn sniffing_classifies_by_content_and_refuses_anything_else() {
     assert_eq!(attachment::sniff_attachment(&png()), Some("image/png"));
     assert_eq!(attachment::sniff_attachment(&pdf()), Some("application/pdf"));
     assert_eq!(
+        attachment::sniff_attachment(&docx()),
+        Some("application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+    );
+    assert_eq!(
+        attachment::extract_docx_text(&docx()).as_deref(),
+        Some("Neev DOCX smoke test\nSales team onboarding document.")
+    );
+    assert_eq!(
         attachment::sniff_attachment(b"fn main() {}\n"),
         Some("text/plain")
     );
@@ -49,6 +78,19 @@ fn sniffing_classifies_by_content_and_refuses_anything_else() {
     // Binary that matches nothing is refused rather than stored as text.
     assert_eq!(attachment::sniff_attachment(&[0x00, 0x01, 0xFF, 0xFE]), None);
     assert_eq!(attachment::sniff_attachment(&[]), None);
+}
+
+#[test]
+fn a_generic_zip_is_not_admitted_as_a_docx() {
+    let mut bytes = Vec::new();
+    let mut archive = zip::ZipWriter::new(std::io::Cursor::new(&mut bytes));
+    archive
+        .start_file("readme.txt", zip::write::SimpleFileOptions::default())
+        .unwrap();
+    use std::io::Write;
+    archive.write_all(b"not a Word document").unwrap();
+    archive.finish().unwrap();
+    assert_eq!(attachment::sniff_attachment(&bytes), None);
 }
 
 /// The name reaches a filesystem inside the sandbox, so anything that could
@@ -87,6 +129,33 @@ fn names_that_could_escape_the_staging_directory_are_refused() {
 #[tokio::test]
 async fn attachment_serve_enforces_the_bound_chats_private_acl() {
     private_attachment_contract(h::database().await).await;
+}
+
+#[tokio::test]
+async fn a_docx_is_stored_and_resolved_for_a_run() {
+    let harness = Harness::new(h::database().await).await;
+    let chat = chat(&harness).await;
+    let stored = attachment::store(
+        &harness.state,
+        &harness.creator,
+        Owner::Chat(&chat.id),
+        "onboarding.docx",
+        &docx(),
+    )
+    .await
+    .expect("DOCX content type is allowed by the schema");
+    assert_eq!(stored.content_type, attachment::DOCX_CONTENT_TYPE);
+    let resolved = attachment::resolve_for_run(
+        &harness.state,
+        &harness.creator,
+        Owner::Chat(&chat.id),
+        &[stored.key],
+    )
+    .await
+    .expect("DOCX bytes reach the run");
+    assert_eq!(resolved.len(), 1);
+    assert_eq!(resolved[0].content_type, attachment::DOCX_CONTENT_TYPE);
+    assert_eq!(attachment::extract_docx_text(&resolved[0].bytes).as_deref(), Some("Neev DOCX smoke test\nSales team onboarding document."));
 }
 
 #[tokio::test]

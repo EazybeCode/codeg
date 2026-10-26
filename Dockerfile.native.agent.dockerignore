@@ -8,6 +8,15 @@
 !scripts/operations/neev_login_network_profile.py
 !scripts/operations/neev_codex_login_egress.py
 
+!scripts/
+!scripts/operations/
+!scripts/operations/*.py
+!scripts/operations/neev_response_style.md
+!deploy/
+!deploy/mcp-packages/
+!deploy/mcp-packages/package.json
+!deploy/mcp-packages/package-lock.json
+
 **/.env*
 **/.context
 **/.context/**

@@ -33,6 +33,12 @@
 !src-tauri/vendor/sacp-tokio/
 !src-tauri/vendor/sacp-tokio/**
 
+!tools/
+!tools/neev-browser/
+!tools/neev-browser/extension/
+!tools/neev-browser/extension/lib/
+!tools/neev-browser/extension/lib/signin.js
+
 **/.env*
 **/.context
 **/.context/**

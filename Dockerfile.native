@@ -9,6 +9,7 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc LICENSE ./
 RUN pnpm install --frozen-lockfile --ignore-scripts
 
 COPY src/ ./src/
+COPY tools/neev-browser/extension/lib/signin.js ./tools/neev-browser/extension/lib/signin.js
 COPY public/ ./public/
 COPY components.json next.config.ts postcss.config.mjs tsconfig.json ./
 

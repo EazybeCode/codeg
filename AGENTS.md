@@ -1,3 +1,5 @@
+> **Neev maintainers:** Start with [docs/NEEV-HANDOVER.md](docs/NEEV-HANDOVER.md). It identifies the deployed branch, native runtime, verification steps, and pending work.
+
 # AGENTS.md
 
 This file provides guidance to Code Agent when working with code in this repository.

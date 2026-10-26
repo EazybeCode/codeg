@@ -539,7 +539,7 @@ export function AttachmentButton({
         multiple
         // Advisory only — the bytes decide, here and on the server. It keeps a
         // system file dialog from showing files that would only be refused.
-        accept="image/png,image/jpeg,image/webp,application/pdf,text/*"
+        accept="image/png,image/jpeg,image/webp,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/*"
         className="hidden"
         tabIndex={-1}
         aria-hidden

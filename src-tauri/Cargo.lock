@@ -1085,6 +1085,7 @@ dependencies = [
  "portable-pty",
  "prost",
  "qrcode",
+ "quick-xml 0.38.4",
  "rand 0.8.5",
  "regex",
  "reqwest 0.12.28",

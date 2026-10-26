@@ -19,6 +19,7 @@ import {
 } from "./neev-attachments"
 
 const PNG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4]
+const DOCX_ZIP_HEADER = [0x50, 0x4b, 0x03, 0x04, 0x14, 0x00, 0x00, 0x00]
 const CHAT = "11111111-1111-4111-8111-111111111111"
 const KEY = "22222222-2222-2222-2222-222222222222"
 
@@ -72,6 +73,13 @@ describe("sniffing", () => {
     )
     // And a PNG is a PNG even when the browser declared nothing at all.
     expect(await classifyFile(file("a.png", PNG))).toBe("image/png")
+  })
+
+  it("recognizes a Word document by its ZIP signature and extension", async () => {
+    const value = file("onboarding.docx", DOCX_ZIP_HEADER, "application/octet-stream")
+    expect(await classifyFile(value)).toBe(
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    )
   })
 })
 
@@ -137,6 +145,19 @@ describe("admission", () => {
       { name: "a.zip", reason: "unsupportedType" },
       { name: "nothing.txt", reason: "empty" },
     ])
+  })
+
+  it("admits DOCX files for upload", async () => {
+    const value = file("onboarding.docx", DOCX_ZIP_HEADER)
+    const { accepted, rejected } = await admitFiles([value])
+    expect(accepted).toEqual([
+      {
+        file: value,
+        contentType:
+          "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      },
+    ])
+    expect(rejected).toEqual([])
   })
 
   it("refuses a name the server would refuse before uploading it", async () => {
