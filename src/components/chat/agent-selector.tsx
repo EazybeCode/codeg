@@ -39,6 +39,7 @@ interface AgentSelectorProps {
   onFallback?: (agentType: AgentType) => void
   onAgentsLoaded?: (agents: AcpAgentInfo[]) => void
   onOpenAgentsSettings?: () => void
+  /** Lock a bound conversation; draft pickers stay usable during startup. */
   disabled?: boolean
   align?: "start" | "center"
 }

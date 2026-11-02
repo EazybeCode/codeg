@@ -336,7 +336,8 @@ it("previews a staged image as data:, never as a blob: the CSP blocks", async ()
     await add([png("shot.png")])
   })
   const thumb = await waitFor(() => {
-    const found = document.querySelector("img")
+    // ProseMirror also inserts a source-less separator image around inline nodes.
+    const found = document.querySelector("img[src]")
     expect(found?.getAttribute("src")).toMatch(/^data:image\/png;base64,/)
     return found!
   })
@@ -360,7 +361,7 @@ it("stages a large image without a preview, and still sends it", async () => {
   })
   await waitFor(() => expect(tray().uploading).toBe(false))
   expect(tray().items[0].previewUrl).toBeNull()
-  expect(document.querySelector("img")).toBeNull()
+  expect(document.querySelector("img[src]")).toBeNull()
   expect(screen.getByText("huge.png")).toBeInTheDocument()
   expect(await tray().takeKeys()).toEqual([key(1)])
 })

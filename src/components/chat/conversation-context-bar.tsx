@@ -226,6 +226,9 @@ export const ConversationHeaderFolderPicker = memo(
                 // user's current agent when the target folder has no pinned default.
                 openNewConversationTab(target.id, target.path, {
                   inheritFromActive: true,
+                  ...(ownTab.conversationId == null
+                    ? { retargetTabId: ownTab.id }
+                    : {}),
                 })
                 toast.success(t("toasts.folderChanged", { name: target.name }))
               } catch (err) {
@@ -242,7 +245,11 @@ export const ConversationHeaderFolderPicker = memo(
             isChatMode={isChatMode}
             onSelectChatMode={() => {
               try {
-                openChatModeTab()
+                openChatModeTab(
+                  ownTab.conversationId == null
+                    ? { retargetTabId: ownTab.id }
+                    : undefined
+                )
                 toast.success(t("toasts.switchedToChatMode"))
               } catch (err) {
                 console.error(
@@ -399,9 +406,14 @@ export const ConversationFolderBranchPicker = memo(
               // runs the disconnect-then-patch dance for folder+agent
               // changes. `inheritFromActive: true` preserves the user's
               // current agent when the target folder has no pinned default
-              // — "I'm switching folders, keep my workflow".
+              // — "I'm switching folders, keep my workflow". `retargetTabId`
+              // names ownTab outright: while tabs follow the folder, the
+              // target folder may hold a draft of its own.
               openNewConversationTab(target.id, target.path, {
                 inheritFromActive: true,
+                ...(ownTab!.conversationId == null
+                  ? { retargetTabId: ownTab!.id }
+                  : {}),
               })
               toast.success(t("toasts.folderChanged", { name: target.name }))
             } catch (err) {
@@ -423,7 +435,13 @@ export const ConversationFolderBranchPicker = memo(
               return
             }
             try {
-              openChatModeTab()
+              // Like the folder switch: this draft itself moves (see
+              // `retargetTabId`), whatever the global scope already holds.
+              openChatModeTab(
+                ownTab!.conversationId == null
+                  ? { retargetTabId: ownTab!.id }
+                  : undefined
+              )
               toast.success(t("toasts.switchedToChatMode"))
             } catch (err) {
               console.error(

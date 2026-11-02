@@ -7,10 +7,16 @@ import { isDesktop } from "@/lib/platform"
 import { TeamLogin } from "@/components/team/team-login"
 import { NativeLogin } from "@/components/neev/native-login"
 import { useTeamMode } from "@/components/team/team-mode-boundary"
+import {
+  codegAuthHeaders,
+  probeProxyAuthentication,
+  unauthorizedSource,
+} from "@/lib/transport/web-auth"
 
 function OperatorLoginPage() {
   const router = useRouter()
   const t = useTranslations("LoginPage")
+  const tConnection = useTranslations("WebConnection")
   const [token, setToken] = useState("")
   const [error, setError] = useState("")
   const [loading, setLoading] = useState(false)
@@ -18,6 +24,19 @@ function OperatorLoginPage() {
   useEffect(() => {
     document.title = t("documentTitle")
   }, [t])
+
+  // Signed in through a proxy in front of Codeg (CODEG_AUTH=proxy-jwt), there
+  // is no token to ask for.
+  useEffect(() => {
+    if (isDesktop()) return
+    let cancelled = false
+    void probeProxyAuthentication().then((result) => {
+      if (!cancelled && result === "proxy") router.replace("/workspace")
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [router])
 
   // Desktop users skip login entirely
   if (isDesktop()) {
@@ -36,7 +55,7 @@ function OperatorLoginPage() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
+          ...codegAuthHeaders(token),
         },
         body: "{}",
       })
@@ -44,6 +63,12 @@ function OperatorLoginPage() {
       if (res.ok) {
         localStorage.setItem("codeg_token", token)
         router.replace("/workspace")
+      } else if (
+        res.status === 401 &&
+        unauthorizedSource(res.headers.get("www-authenticate")) === "proxy"
+      ) {
+        // The proxy in front of Codeg refused before the token was checked.
+        setError(tConnection("proxySignInDescription"))
       } else if (res.status === 401) {
         setError(t("invalidToken"))
       } else {

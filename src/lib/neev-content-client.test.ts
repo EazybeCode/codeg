@@ -169,7 +169,8 @@ describe("native content wire validation", () => {
       expect.any(String),
       expect.objectContaining({
         body: JSON.stringify(input),
-        signal,
+        // nativeRequest links the caller to its own timeout controller.
+        signal: expect.any(AbortSignal),
         cache: "no-store",
         headers: expect.objectContaining({ "x-neev-csrf": "csrf" }),
       })
@@ -300,8 +301,7 @@ describe("native content wire validation", () => {
     ).toThrow()
   })
 
-  it("classifies resource 404 separately from session 401 without reading bodies", async () => {
-    const json = vi.spyOn(Response.prototype, "json")
+  it("classifies resource 404 separately from session 401 without exposing bodies", async () => {
     vi.stubGlobal(
       "fetch",
       vi
@@ -311,17 +311,19 @@ describe("native content wire validation", () => {
         )
         .mockResolvedValueOnce(new Response("expired session", { status: 401 }))
     )
-    await expect(
-      contentGet("/api/neev/resources/ce39f83c-4511-4ff7-80d3-c06184ee8c50")
-    ).rejects.toMatchObject({
-      kind: "not_found",
-    })
-    await expect(
-      contentGet("/api/neev/resources/ce39f83c-4511-4ff7-80d3-c06184ee8c50")
-    ).rejects.toMatchObject({
-      kind: "unauthorized",
-    })
-    expect(json).not.toHaveBeenCalled()
+    const missing = await contentGet(
+      "/api/neev/resources/" + resource.id
+    ).catch((error) => error)
+    const expired = await contentGet(
+      "/api/neev/resources/" + resource.id
+    ).catch((error) => error)
+    expect(missing).toMatchObject({ kind: "not_found" })
+    expect(expired).toMatchObject({ kind: "unauthorized" })
+    // Error bodies may be parsed for allowlisted action codes, but arbitrary
+    // text must never escape into a user-facing error.
+    expect(String(missing)).not.toContain("private path leaked")
+    expect(String(expired)).not.toContain("expired session")
+    expect(expired.code).toBeUndefined()
   })
 
   it("uses the session CSRF contract for mutations", async () => {

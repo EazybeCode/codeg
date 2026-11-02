@@ -3,11 +3,11 @@ import { workspaceErrorCode, workspaceErrorKey } from "@/lib/workspace-errors"
 
 import { useCallback, useEffect, useRef, useState } from "react"
 import { useTranslations } from "next-intl"
-import { toast } from "sonner"
 import { useAcpActions } from "@/contexts/acp-connections-context"
 import { useTaskContext } from "@/contexts/task-context"
 import { useConnection, type UseConnectionReturn } from "@/hooks/use-connection"
 import { extractAppCommandError } from "@/lib/app-error"
+import { notify } from "@/lib/notify"
 import { isConnectionBusy } from "@/lib/connection-teardown"
 import { TurnBusyError } from "@/lib/turn-busy"
 import { type AgentType, type PromptDraft } from "@/lib/types"
@@ -28,6 +28,24 @@ interface UseConnectionLifecycleOptions {
   workspaceChatId?: number
   /** Also defer while a saved managed tab is resolving its canonical identity. */
   managedWorkspace?: boolean
+  /**
+   * True while the CALLER is deliberately holding auto-connect back until it
+   * has resolved something the connection needs — today a historical
+   * conversation's `external_id`, which must be known before connecting or the
+   * backend falls back to `session/new` and orphans the history.
+   *
+   * It exists because `isActive` cannot say this: callers pass
+   * `isActive && canConnectYet`, which collapses "this tab is in the
+   * background" (nothing should happen) with "this tab is opening and is
+   * waiting on its own fetch" (something IS happening, it just has nothing to
+   * show yet). Without the distinction that wait — the first, silent leg of
+   * opening an old conversation — produced no loading state and no status-bar
+   * task, so the window read as a dead composer.
+   *
+   * Callers should AND it with their own active flag: a background tab must not
+   * put a row in the (global) status bar.
+   */
+  preparing?: boolean
   /**
    * Read at unmount-cleanup time: true when the component is unmounting
    * because the view is being REPARENTED (its tab moved between split groups /
@@ -121,6 +139,7 @@ export function useConnectionLifecycle({
   conversationId,
   workspaceChatId,
   managedWorkspace = false,
+  preparing = false,
   isTransientUnmount,
 }: UseConnectionLifecycleOptions): UseConnectionLifecycleReturn {
   const managed = managedWorkspace || workspaceChatId != null
@@ -220,14 +239,15 @@ export function useConnectionLifecycle({
   // Skip loading indicators when we have cached selectors — even if the
   // cache contains no modes/configOptions (the agent simply doesn't have
   // them), we already know what to show and don't need a loading state.
-  const modeLoading =
-    !hasCachedSelectors &&
-    (status === "connecting" ||
-      (isInteractiveStatus && !effectiveSelectorsReady))
-  const configOptionsLoading =
-    !hasCachedSelectors &&
-    (status === "connecting" ||
-      (isInteractiveStatus && !effectiveSelectorsReady))
+  // `preparing` is the leg BEFORE `connecting`, when the caller is still
+  // resolving what to connect to; the selectors are just as unknown there, and
+  // leaving it out is what made an opening conversation show a bare composer.
+  const selectorsPending =
+    preparing ||
+    status === "connecting" ||
+    (isInteractiveStatus && !effectiveSelectorsReady)
+  const modeLoading = !hasCachedSelectors && selectorsPending
+  const configOptionsLoading = !hasCachedSelectors && selectorsPending
   // Gate for send button: block until the backend session is fully
   // initialized (selectorsReady from the real backend event, not cache).
   const selectorsLoading = isInteractiveStatus && !selectorsReady
@@ -318,41 +338,71 @@ export function useConnectionLifecycle({
     }
   }, [isActive, workingDir, agentType, managed])
 
-  // Manage task status for connection progress
+  // Status-bar task for the two legs that precede a usable session:
+  //   "preparing"  — the caller is resolving what to connect to (see `preparing`)
+  //   "connecting" — `connect()` is in flight: agent spawn, ACP `initialize`,
+  //                  then `session/resume|load|new`
+  // (The third leg, session init after `connected`, has its own task below.)
+  // A task's label is fixed when it is added, so a change to what it names
+  // retires the old row and mints a new one rather than leaving stale wording
+  // on screen. That is the leg, and also the agent: a draft can switch agents
+  // while it connects, and the status reads `connecting` straight through it.
+  // The agent named is the one actually coming up — the entry's own while one
+  // is there (the switch has yet to tear it down, or a failed preflight left
+  // it running), else the one asked for.
+  const connAgentType = conn.agentType
   const taskIdRef = useRef<string | null>(null)
+  const taskLabelKeyRef = useRef<string | null>(null)
   useEffect(() => {
-    if (status === "connecting") {
-      if (!taskIdRef.current) {
-        const id = `acp-connect-${Date.now()}`
-        taskIdRef.current = id
-        const agent = getAgentLabel(agentType)
-        addTask(
-          id,
-          t("tasks.connectingTitle", { agent }),
-          t("tasks.connectingDescription")
-        )
-      }
-      updateTask(taskIdRef.current, { status: "running" })
-    } else if (status === "connected" || status === "prompting") {
-      if (taskIdRef.current) {
-        updateTask(taskIdRef.current, { status: "completed" })
-        taskIdRef.current = null
-      }
-    } else if (status === "error") {
-      if (taskIdRef.current) {
-        updateTask(taskIdRef.current, {
+    const phase =
+      status === "connecting" ? "connecting" : preparing ? "preparing" : null
+    const taskAgentType = connAgentType ?? agentType
+    const labelKey = phase === null ? null : `${phase}:${taskAgentType}`
+    if (labelKey !== null && labelKey === taskLabelKeyRef.current) return
+    taskLabelKeyRef.current = labelKey
+    if (taskIdRef.current) {
+      const finished = taskIdRef.current
+      taskIdRef.current = null
+      if (
+        phase === null &&
+        (status === "connected" || status === "prompting")
+      ) {
+        updateTask(finished, { status: "completed" })
+      } else if (phase === null && status === "error") {
+        updateTask(finished, {
           status: "failed",
           error: t("errors.connectionFailed"),
         })
-        taskIdRef.current = null
-      }
-    } else if (status === "disconnected" || status === null) {
-      if (taskIdRef.current) {
-        removeTask(taskIdRef.current)
-        taskIdRef.current = null
+      } else {
+        removeTask(finished)
       }
     }
-  }, [status, addTask, updateTask, removeTask, agentType, t])
+    if (phase === null) return
+    // The agent is in the id too: a switch can retire a row and mint its
+    // replacement within the same millisecond.
+    const id = `acp-${phase}-${taskAgentType}-${Date.now()}`
+    taskIdRef.current = id
+    const agent = getAgentLabel(taskAgentType)
+    addTask(
+      id,
+      phase === "connecting"
+        ? t("tasks.connectingTitle", { agent })
+        : t("tasks.preparingTitle", { agent }),
+      phase === "connecting"
+        ? t("tasks.connectingDescription")
+        : t("tasks.preparingDescription")
+    )
+    updateTask(id, { status: "running" })
+  }, [
+    status,
+    preparing,
+    addTask,
+    updateTask,
+    removeTask,
+    agentType,
+    connAgentType,
+    t,
+  ])
 
   const clearSelectorTask = useCallback(() => {
     if (selectorTaskIdRef.current) {
@@ -477,13 +527,24 @@ export function useConnectionLifecycle({
     touchActivity,
   ])
 
+  // Why connecting failed, for the composer's inline banner. The auto-connect's
+  // own rejection says it first; a request parked behind another in-flight
+  // connect never rejects to it (its promise resolves at once, and the run
+  // that fails comes later), so fall back to what the provider published for
+  // this key — the record the toast and the status chip show — as long as it
+  // names the agent this surface wants. `detail ?? title` is the text that
+  // request would have rejected with.
+  const publishedConnectError =
+    conn.connectError?.agentType === agentType ? conn.connectError : null
   const autoConnectError =
     status === "connected" || status === "prompting"
       ? null
       : lastAutoConnectError?.contextKey === contextKey &&
           lastAutoConnectError.agentType === agentType
         ? lastAutoConnectError.message
-        : null
+        : publishedConnectError
+          ? (publishedConnectError.detail ?? publishedConnectError.title)
+          : null
 
   // sendPrompt, connCancel, connRespondPermission are stable (depend
   // only on actions + contextKey), so these callbacks are effectively stable.
@@ -550,7 +611,11 @@ export function useConnectionLifecycle({
             ? tCatalog(workspaceErrorKey(e))
             : (appError?.message ??
               (e instanceof Error ? e.message : String(e ?? "unknown error")))
-        toast.error(t("errors.sendPromptFailed", { error: message }))
+        notify({
+          level: "error",
+          key: `send-failed:${contextKey}`,
+          title: t("errors.sendPromptFailed", { error: message }),
+        })
         // Let the caller settle its optimistic state (roll back the phantom
         // user turn, drop out of awaiting_persist so the queue keeps
         // flushing). Runs after the toast so the state rollback can't hide
@@ -584,12 +649,19 @@ export function useConnectionLifecycle({
 
   const handleSetConfigOption = useCallback(
     (configId: string, valueId: string) => {
+      // The connection here still belongs to another agent (a draft mid-switch,
+      // or one whose new pick could not connect), so the options on screen are
+      // the selected agent's cached ones. Applying the edit would hand the
+      // other agent a value from a list that isn't its own, and file it under
+      // that agent's saved preferences. Dropped, as an edit is when there is
+      // no connection here at all.
+      if (connAgentType != null && connAgentType !== agentType) return
       touchActivity(contextKey)
       connSetConfigOption(configId, valueId).catch((e: unknown) =>
         console.error("[ConnLifecycle] setConfigOption:", e)
       )
     },
-    [connSetConfigOption, contextKey, touchActivity]
+    [agentType, connAgentType, connSetConfigOption, contextKey, touchActivity]
   )
 
   const handleRespondPermission = useCallback(

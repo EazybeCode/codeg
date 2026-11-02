@@ -60,6 +60,8 @@ function renderRow(
     onUnqueueMerge: noop,
     onComplete: noop,
     onArchive: noop,
+    onDefer: noop,
+    onFollowUp: noop,
     onEdit: noop,
     onSchedule: noop,
     ...handlers,
@@ -160,6 +162,34 @@ describe("TaskRow", () => {
     expect(screen.getByText("installing deps")).toBeTruthy()
   })
 
+  it("says a round is compacting, in every status that can be", () => {
+    // The line exists for exactly this: a resumed round parks on its
+    // pre-prompt compaction — `preparing` for a retry or a follow-up,
+    // `merging` for a landing — and on a full context window that is minutes
+    // with nothing else on screen to explain it.
+    for (const status of ["preparing", "merging"] as const) {
+      const { unmount } = renderRow(task({ status, compacting: true }))
+      expect(screen.getByText("Compacting the session context…")).toBeTruthy()
+      unmount()
+    }
+
+    // It outranks the agent's own last milestone: it is both the newer truth
+    // and the one the user cannot otherwise account for.
+    const { unmount } = renderRow(
+      task({
+        status: "merging",
+        compacting: true,
+        latest_progress: "installing deps",
+      })
+    )
+    expect(screen.queryByText("installing deps")).toBeNull()
+    unmount()
+
+    // And a settled row never claims it, whatever a stale flag says.
+    renderRow(task({ status: "review", compacting: true }))
+    expect(screen.queryByText("Compacting the session context…")).toBeNull()
+  })
+
   it("marks the row with the agent the task runs under", () => {
     const { unmount } = renderRow(task({ agent_type: "codex" }))
     expect(screen.getByTitle("Codex")).toBeInTheDocument()
@@ -199,5 +229,37 @@ describe("TaskRow", () => {
       })
     )
     expect(screen.queryByText("Worktree removed")).toBeNull()
+  })
+
+  it("puts a reviewed row aside, and a deferred row stops asking for the user", async () => {
+    const onDefer = vi.fn()
+    const { unmount } = renderRow(task(), { onDefer })
+    // Waiting on the user: the primary is filled.
+    expect(screen.getByRole("button", { name: "Merge" })).toHaveAttribute(
+      "data-variant",
+      "default"
+    )
+    await userEvent.click(screen.getByRole("button", { name: "Handle later" }))
+    expect(onDefer).toHaveBeenCalledTimes(1)
+    unmount()
+
+    const onFollowUp = vi.fn()
+    const onBack = vi.fn()
+    renderRow(task({ deferred_at: "2026-08-01T02:00:00Z" }), {
+      onFollowUp,
+      onDefer: onBack,
+    })
+    expect(screen.getByText("Deferred")).toBeInTheDocument()
+    // Put aside by the user's own word: the follow-up leads, but outlined —
+    // the filled button is reserved for rows that are waiting right now.
+    const followUp = screen.getByRole("button", { name: "Follow up" })
+    expect(followUp).toHaveAttribute("data-variant", "outline")
+    await userEvent.click(followUp)
+    expect(onFollowUp).toHaveBeenCalledTimes(1)
+    await userEvent.click(
+      screen.getByRole("button", { name: "Back to Needs you" })
+    )
+    expect(onBack).toHaveBeenCalledTimes(1)
+    expect(screen.queryByRole("button", { name: "Merge" })).toBeNull()
   })
 })

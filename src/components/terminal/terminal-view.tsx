@@ -1,9 +1,11 @@
 "use client"
 
 import { useEffect, useRef, useState } from "react"
-import { subscribe } from "@/lib/platform"
+import { useTranslations } from "next-intl"
+import { onTransportReady, subscribe } from "@/lib/platform"
 import {
   terminalSpawn,
+  terminalSnapshot,
   terminalWrite,
   terminalResize,
   terminalKill,
@@ -22,9 +24,19 @@ import {
   type TermMods,
 } from "@/lib/terminal/keybar"
 import { TermKeybar } from "@/components/terminal/term-keybar"
+import {
+  TerminalLinkMenu,
+  terminalLinkClickOpensMenu,
+  type TerminalLinkClick,
+} from "@/components/terminal/terminal-link-menu"
+import { getBrowserPrefs } from "@/lib/browser/browser-prefs"
 import { useZoomLevel, useTerminalFont } from "@/hooks/use-appearance"
+import {
+  isPrimaryModifier,
+  useOpenUrlTarget,
+} from "@/hooks/use-open-url-target"
 import { detectPlatform } from "@/hooks/use-platform"
-import type { TerminalEvent } from "@/lib/types"
+import type { TerminalEvent, TerminalSnapshot } from "@/lib/types"
 import type { ITerminalAddon, Terminal as XTermTerminal } from "@xterm/xterm"
 
 function computeTerminalFontSize(base: number, zoomLevel: number): number {
@@ -77,6 +89,29 @@ interface TerminalViewProps {
    * 永远为 false。
    */
   keybarVisible?: boolean
+  /**
+   * 重新接管一个可能已经存在的 PTY，而不是「必然新建」。
+   *
+   * 终端面板刷新时会恢复同一个 PTY；画布终端卡片切换路由时也要继续运行。
+   * 画布路由在切到别的页面时会真卸载，PTY 却应该继续跑
+   * （`pnpm dev` 不该因为用户瞄了一眼待办看板就被杀掉）。此模式下先问后端要
+   * 快照：拿到就把最近输出重放进新开的 xterm 并跳过 spawn，没拿到才新建。
+   *
+   * 一并改掉卸载语义：attach 模式下**永不**在卸载/取消时 kill——PTY 属于卡片，
+   * 不属于这一次挂载。
+   */
+  attach?: boolean
+  /** Restored panel tabs never re-run an old command when the backend has no PTY. */
+  spawnOnMissing?: boolean
+  /** Panel tabs retain finished output; canvas cards keep their spawn fallback. */
+  reuseCompleted?: boolean
+  onSpawned?: (terminalId: string) => void
+  onProcessRestored?: (terminalId: string) => void
+  /**
+   * 让字号无视应用缩放（`useZoomLevel`）。画布用自己的一套缩放，卡片内容一律
+   * 以「board units」绘制，再乘一次应用缩放就会和它所在的盒子对不上。
+   */
+  ignoreAppZoom?: boolean
   onProcessExited?: (terminalId: string) => void
 }
 
@@ -88,16 +123,43 @@ export function TerminalView({
   isActive,
   isVisible,
   keybarVisible = false,
+  attach = false,
+  spawnOnMissing: spawnOnMissingProp = true,
+  reuseCompleted: reuseCompletedProp = false,
+  onSpawned,
+  onProcessRestored,
+  ignoreAppZoom = false,
   onProcessExited,
 }: TerminalViewProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const fitAddonRef = useRef<{ fit: () => void } | null>(null)
   const termRef = useRef<XTermTerminal | null>(null)
   const lastResizeRef = useRef<{ cols: number; rows: number } | null>(null)
+  // Snapshot replays still waiting for xterm to draw them. A fit in that
+  // window would lay the replay out at the pane's width, not the PTY's.
+  const replayGateRef = useRef<{ pending: number } | null>(null)
   const isActiveRef = useRef(isActive)
   const isVisibleRef = useRef(isVisible)
   const onProcessExitedRef = useRef(onProcessExited)
-  const { zoomLevel } = useZoomLevel()
+  const onSpawnedRef = useRef(onSpawned)
+  const onProcessRestoredRef = useRef(onProcessRestored)
+  // Policy for the NEXT attach, read when one starts, not part of what the
+  // mount is attached to. The panel turns `spawnOnMissing` off the moment its
+  // spawn succeeds; re-running the effect on that would dispose the emulator
+  // it just opened (and its focus) to reattach to the very same PTY.
+  const spawnOnMissingRef = useRef(spawnOnMissingProp)
+  const reuseCompletedRef = useRef(reuseCompletedProp)
+  // Link clicks route through the app's link decision (built-in browser vs
+  // system browser, ⌘/Ctrl inverts). xterm's default handler is a bare
+  // `window.open`, which the desktop webview turns into a dead click.
+  const openUrlTarget = useOpenUrlTarget()
+  const openUrlTargetRef = useRef(openUrlTarget)
+  // A link click held for the action menu (optional, off by default): the
+  // user picks the destination instead of the per-source preference.
+  const [linkClick, setLinkClick] = useState<TerminalLinkClick | null>(null)
+  const { zoomLevel: appZoomLevel } = useZoomLevel()
+  // 100 = 「不缩放」。画布卡片走这条：它已经在自己那套缩放里了。
+  const zoomLevel = ignoreAppZoom ? 100 : appZoomLevel
   const { terminalFontStack, terminalFontSize, terminalLigatures } =
     useTerminalFont()
   const zoomLevelRef = useRef(zoomLevel)
@@ -106,6 +168,10 @@ export function TerminalView({
   const terminalLigaturesRef = useRef(terminalLigatures)
   const ligaturesAddonRef = useRef<DisposableAddon | null>(null)
   const [loading, setLoading] = useState(true)
+  const t = useTranslations("Folder.terminal")
+  // Locale changes affect future status text, not ownership of the live PTY.
+  const tRef = useRef(t)
+  tRef.current = t
 
   // ---- 移动端虚拟键栏（CTRL/ALT 闩锁 + 软键盘跟随）----
   // modsRef 是编码真值（xterm.onData 闭包里读它不会过期）；modsUi 只驱动按钮
@@ -198,7 +264,18 @@ export function TerminalView({
 
   useEffect(() => {
     onProcessExitedRef.current = onProcessExited
-  }, [onProcessExited])
+    onSpawnedRef.current = onSpawned
+    onProcessRestoredRef.current = onProcessRestored
+  }, [onProcessExited, onSpawned, onProcessRestored])
+
+  useEffect(() => {
+    spawnOnMissingRef.current = spawnOnMissingProp
+    reuseCompletedRef.current = reuseCompletedProp
+  }, [spawnOnMissingProp, reuseCompletedProp])
+
+  useEffect(() => {
+    openUrlTargetRef.current = openUrlTarget
+  }, [openUrlTarget])
 
   useEffect(() => {
     let cancelled = false
@@ -212,7 +289,14 @@ export function TerminalView({
       if (cancelled || !containerRef.current) return
 
       const fitAddon = new FitAddon()
-      const webLinksAddon = new WebLinksAddon()
+      const webLinksAddon = new WebLinksAddon((event, uri) => {
+        const modifier = isPrimaryModifier(event)
+        if (terminalLinkClickOpensMenu(getBrowserPrefs(), modifier, uri)) {
+          setLinkClick({ url: uri, x: event.clientX, y: event.clientY })
+          return
+        }
+        openUrlTargetRef.current(uri, { source: "terminal", modifier })
+      })
 
       const term = new Terminal({
         cursorBlink: true,
@@ -235,6 +319,8 @@ export function TerminalView({
 
       fitAddonRef.current = fitAddon
       termRef.current = term
+      const replays = { pending: 0 }
+      replayGateRef.current = replays
 
       if (terminalLigaturesRef.current) {
         enableTerminalLigatures(
@@ -251,7 +337,7 @@ export function TerminalView({
       // send is dropped, not retried — re-sending an ambiguous write could
       // duplicate already-delivered bytes, worse than a drop in a shell. See
       // lib/terminal/write-queue.ts.
-      const writeQueue = createWriteQueue((d) => terminalWrite(terminalId, d))
+      let writeQueue = createWriteQueue((d) => terminalWrite(terminalId, d))
       // 暴露给键栏按键——必须走这条队列，否则与软键盘输入抢着发会乱序。
       writeQueueRef.current = writeQueue
 
@@ -341,50 +427,105 @@ export function TerminalView({
         }
       )
 
+      // attach 模式下，订阅到「快照应用完」之间到达的输出先攒着：快照是一次
+      // 往返，中间到的 chunk 既可能已经在快照里（重复），也可能不在（丢失）。
+      // 两者靠 seq 区分——见下面的 writeEvent 与 `TerminalEvent.seq`。
+      let replayBuffer: TerminalEvent[] | null = attach ? [] : null
+      // Every exit that lands while buffering, not just the latest: until the
+      // snapshot names the current generation there is no telling which one
+      // is this process's, and a stale one arriving after it must not hide it.
+      let exitsWhileBuffering: TerminalEvent[] = []
+      let currentGeneration: string | null = null
+      let exitShown = false
+      let unlistenReconnect: (() => void) | null = null
+      let reconnectGeneration = 0
+
+      const showExit = (code?: number | null) => {
+        if (exitShown) return
+        exitShown = true
+        writeQueue.dispose()
+        onProcessExitedRef.current?.(terminalId)
+        const message =
+          code == null
+            ? tRef.current("processExited")
+            : tRef.current("processExitedWithCode", { code })
+        term.write(`\r\n\x1b[90m[${message}]\x1b[0m\r\n`)
+      }
+
+      const isCurrentExit = (event: TerminalEvent) =>
+        !currentGeneration ||
+        !event.generation ||
+        event.generation === currentGeneration
+
+      const showUnavailable = (confirmedMissing: boolean) => {
+        if (exitShown) return
+        exitShown = true
+        if (confirmedMissing) {
+          writeQueue.dispose()
+          onProcessExitedRef.current?.(terminalId)
+        }
+        term.write(`\r\n\x1b[90m[${tRef.current("unavailable")}]\x1b[0m\r\n`)
+      }
+
+      // 已被快照画进这块屏幕的最高游标。缓冲**不足以**当闸门：事件走的通道
+      // （Tauri IPC / WebSocket）和快照那次请求-响应之间没有任何顺序保证，
+      // 所以一个已经被快照收录的 chunk 完全可能在快照应用之后才到达回调，
+      // 那时缓冲已经放行、拦不住它。地板因此是永久的：seq 在一个终端内单调，
+      // 所以「不高于快照游标」在这块 xterm 的整个生命周期都成立。
+      // 只由快照抬高，不由实时事件抬高——实时事件本来就有序且各到一次，拿它们
+      // 抬地板只会在万一乱序时白白吞掉输出。
+      let snapshotSeqFloor = 0
+
+      /** 写一个输出事件，丢弃已经画过的那一段。 */
+      const writeEvent = (event: TerminalEvent) => {
+        // seq 为 0/缺失 = 后端没能给出可比较的游标（旧后端、锁中毒）。此时
+        // 宁可重复也不能丢：多打一行远比吞掉一行输出容易发现和容忍。
+        if (
+          currentGeneration &&
+          event.generation &&
+          event.generation !== currentGeneration
+        )
+          return
+        const seq = event.seq ?? 0
+        if (seq > 0 && seq <= snapshotSeqFloor) return
+        term.write(event.data)
+      }
+
       // Subscribe to events BEFORE spawning so no initial output is lost
       const unlisten = await subscribe<TerminalEvent>(
         `terminal://output/${terminalId}`,
         (payload) => {
-          term.write(payload.data)
+          if (replayBuffer) {
+            replayBuffer.push(payload)
+            return
+          }
+          writeEvent(payload)
         }
       )
+
+      /** 放行攒着的事件，跳过快照里已经有的那一段。 */
+      const flushReplay = (snapshotSeq: number | null) => {
+        const buffered = replayBuffer ?? []
+        replayBuffer = null
+        if (snapshotSeq != null && snapshotSeq > snapshotSeqFloor) {
+          snapshotSeqFloor = snapshotSeq
+        }
+        for (const event of buffered) writeEvent(event)
+        const exits = exitsWhileBuffering
+        exitsWhileBuffering = []
+        if (exits.some(isCurrentExit)) showExit()
+      }
 
       const unlistenExit = await subscribe<TerminalEvent>(
         `terminal://exit/${terminalId}`,
-        () => {
-          // PTY is gone — stop the input pump (the reliable terminal-gone
-          // signal; the queue's error-string match is only a fast-path).
-          writeQueue.dispose()
-          onProcessExitedRef.current?.(terminalId)
-          term.write("\r\n\x1b[90m[Process exited]\x1b[0m\r\n")
+        (event) => {
+          if (replayBuffer) exitsWhileBuffering.push(event)
+          else if (isCurrentExit(event)) showExit()
         }
       )
 
       if (cancelled) {
         writeQueue.dispose()
-        themeObserver.disconnect()
-        onDataDisposable.dispose()
-        onResizeDisposable.dispose()
-        unlisten()
-        unlistenExit()
-        term.dispose()
-        return
-      }
-
-      // Spawn the terminal AFTER subscribing to events
-      try {
-        await terminalSpawn(workingDir, shell, initialCommand, terminalId)
-      } catch (err) {
-        onProcessExitedRef.current?.(terminalId)
-        term.write(`\r\n\x1b[31m[Failed to start terminal: ${err}]\x1b[0m\r\n`)
-      } finally {
-        if (!cancelled) setLoading(false)
-      }
-
-      // If unmounted while spawn was in flight, clean up the spawned PTY
-      if (cancelled) {
-        writeQueue.dispose()
-        terminalKill(terminalId).catch(() => {})
         themeObserver.disconnect()
         onDataDisposable.dispose()
         onResizeDisposable.dispose()
@@ -396,11 +537,242 @@ export function TerminalView({
 
       const fitIfReady = () => {
         const el = containerRef.current
-        if (!el) return
+        if (!el || replays.pending > 0) return
         if (!isActiveRef.current || !isVisibleRef.current) return
         if (el.clientWidth <= 0 || el.clientHeight <= 0) return
         fitAddon.fit()
       }
+
+      /** 把快照写进这个全新的 xterm，并放行不在快照里的那段缓冲输出。 */
+      const applySnapshot = (snapshot: TerminalSnapshot) => {
+        if (snapshot.alive && exitShown) {
+          writeQueue.dispose()
+          writeQueue = createWriteQueue((d) => terminalWrite(terminalId, d))
+          writeQueueRef.current = writeQueue
+          onProcessRestoredRef.current?.(terminalId)
+          exitShown = false
+        }
+        currentGeneration = snapshot.generation ?? null
+        if (snapshot.cols && snapshot.rows) {
+          // Replay at the size the output was laid out for. Drawn narrower,
+          // a full-width line wraps: zsh pads its end-of-output mark to the
+          // right edge, and a stray "%" line is left behind. The PTY is this
+          // size already, so this sends no resize, and one still queued from
+          // an earlier fit is stale. Fitting to the pane sends the right one,
+          // once the replay below has been drawn.
+          if (resizeTimer) {
+            clearTimeout(resizeTimer)
+            resizeTimer = null
+          }
+          lastResizeRef.current = { cols: snapshot.cols, rows: snapshot.rows }
+          term.resize(snapshot.cols, snapshot.rows)
+        }
+        replays.pending++
+        if (snapshot.data) term.write(snapshot.data)
+        const pendingExits = exitsWhileBuffering
+        exitsWhileBuffering = []
+        flushReplay(snapshot.seq)
+        if (!snapshot.alive || pendingExits.some(isCurrentExit)) {
+          showExit(snapshot.exit_code)
+        }
+        // xterm parses writes later, in order; this runs after all of them.
+        // Until then every fit waits (see `fitIfReady`), then one catches up.
+        term.write("", () => {
+          replays.pending--
+          requestAnimationFrame(() => {
+            if (!cancelled) fitIfReady()
+          })
+        })
+        setLoading(false)
+      }
+
+      /** 卸载已经发生：拆掉这次挂载建立的一切。attach 模式下 PTY 不归这次挂载，
+       *  所以调用方各自决定要不要 kill。 */
+      const teardown = () => {
+        if (replayGateRef.current === replays) replayGateRef.current = null
+        writeQueue.dispose()
+        themeObserver.disconnect()
+        onDataDisposable.dispose()
+        onResizeDisposable.dispose()
+        unlisten()
+        unlistenExit()
+        unlistenReconnect?.()
+        term.dispose()
+      }
+
+      // Web and remote-desktop event sockets can miss chunks while offline.
+      // Their ready notification fires after the server subscribes, so buffer
+      // live chunks, redraw from one backend snapshot, then apply only events
+      // newer than that snapshot's sequence.
+      let bootstrapping = true
+      let readyDuringStartup = false
+      const syncFromBackend = () => {
+        if (cancelled) return
+        const generation = ++reconnectGeneration
+        // A sync still in flight keeps what it buffered. This newer snapshot
+        // supersedes it, but if the request fails, those events — received
+        // and never drawn — must still be flushed rather than dropped.
+        if (!replayBuffer) {
+          replayBuffer = []
+          exitsWhileBuffering = []
+        }
+        void terminalSnapshot(terminalId)
+          .then((snapshot) => {
+            if (cancelled || generation !== reconnectGeneration) return
+            if (!snapshot.alive && !snapshot.exists) {
+              flushReplay(null)
+              showUnavailable(true)
+              return
+            }
+            term.reset()
+            snapshotSeqFloor = 0
+            // The reset wiped the exit line with everything else; an ended
+            // process gets it drawn again from the snapshot.
+            if (!snapshot.alive) exitShown = false
+            applySnapshot(snapshot)
+          })
+          .catch(() => {
+            if (cancelled || generation !== reconnectGeneration) return
+            // A transient HTTP failure is not proof that the PTY exited.
+            flushReplay(null)
+          })
+      }
+      unlistenReconnect = onTransportReady(() => {
+        // If the first server ready lands while the startup snapshot is still
+        // in flight, let that snapshot finish, then resample. The ready event
+        // cannot be missed between the probe and listener registration.
+        if (bootstrapping) {
+          readyDuringStartup = true
+          return
+        }
+        syncFromBackend()
+      })
+
+      // A restored tab only knows an ID. A reload can beat a terminal_spawn
+      // request still in flight, so probe for a short bounded interval before
+      // declaring it unavailable; never replay its original command.
+      const readSnapshot = async (
+        retryMissing: boolean,
+        accept: (snapshot: TerminalSnapshot) => boolean = (snapshot) =>
+          !!(snapshot.alive || snapshot.exists)
+      ) => {
+        const deadline = Date.now() + 10_000
+        let lastAnswer: TerminalSnapshot | null = null
+        do {
+          const snapshot = await terminalSnapshot(terminalId).catch(() => null)
+          if (cancelled) return null
+          if (snapshot && accept(snapshot)) return snapshot
+          if (!retryMissing) return snapshot
+          lastAnswer = snapshot
+          await new Promise((resolve) => setTimeout(resolve, 150))
+        } while (!cancelled && Date.now() < deadline)
+        // Out of time: the last probe's answer. A session the backend still
+        // reports missing counts as gone; one the last probe could not reach
+        // stays unconfirmed, as an earlier "missing" may be out of date.
+        return cancelled ? null : lastAnswer
+      }
+
+      // Read once: this attach runs under the policy it started with.
+      const spawnOnMissing = spawnOnMissingRef.current
+      const reuseCompleted = reuseCompletedRef.current
+      let attached = false
+      let confirmedMissing = false
+      let previousCompleted: TerminalSnapshot | null = null
+      if (attach) {
+        const snapshot = await readSnapshot(!spawnOnMissing)
+        if (cancelled) {
+          teardown()
+          return
+        }
+        confirmedMissing =
+          snapshot != null && !snapshot.alive && !snapshot.exists
+        if (snapshot?.exists && !snapshot.alive) previousCompleted = snapshot
+        if (snapshot?.alive || (reuseCompleted && snapshot?.exists)) {
+          attached = true
+          applySnapshot(snapshot)
+        }
+        // Keep buffering through spawn: a competing mount may win the ID and
+        // its first output may otherwise be replayed twice.
+      }
+
+      if (!attached && !spawnOnMissing) {
+        flushReplay(null)
+        showUnavailable(confirmedMissing)
+        setLoading(false)
+      }
+
+      // A new panel tab and canvas card can spawn. Restored panel tabs cannot.
+      if (!attached && spawnOnMissing) {
+        try {
+          await terminalSpawn(workingDir, shell, initialCommand, terminalId)
+          // Reported before anything that bails out on unmount: the tab
+          // outlives this view (a drawer swiped shut mid-spawn), and whichever
+          // view mounts for it next must attach, never launch the command twice.
+          onSpawnedRef.current?.(terminalId)
+          // This handshake gives buffered output its PTY generation. A delayed
+          // event from a previous process with this same id must not leak in,
+          // so a failed request is retried rather than taken as "no filter".
+          const launched = attach ? await readSnapshot(true, () => true) : null
+          if (cancelled) {
+            teardown()
+            return
+          }
+          if (launched?.alive || launched?.exists) applySnapshot(launched)
+          else flushReplay(null)
+        } catch (err) {
+          // A second mount can lose to the first while its PTY is still in
+          // openpty/spawn and absent from snapshots. Wait only for that known
+          // duplicate race; a genuine launch error should surface promptly.
+          const duplicateId = String(err).includes("already exists")
+          // A canvas may have deliberately ignored a completed PTY before
+          // spawning. That old tombstone can remain visible while another
+          // mount is still spawning this ID. A completed retry needs either
+          // a confirmed empty snapshot before spawning or a new generation;
+          // an initial snapshot request failure proves neither.
+          const isNewProcess = (candidate: TerminalSnapshot) =>
+            !!(
+              candidate.alive ||
+              (candidate.exists &&
+                (confirmedMissing ||
+                  (previousCompleted?.generation &&
+                    candidate.generation &&
+                    candidate.generation !== previousCompleted.generation)))
+            )
+          const retry = attach
+            ? await readSnapshot(duplicateId, isNewProcess)
+            : null
+          if (cancelled) {
+            teardown()
+            return
+          }
+          if (retry && isNewProcess(retry)) {
+            attached = true
+            applySnapshot(retry)
+            onSpawnedRef.current?.(terminalId)
+          } else {
+            flushReplay(null)
+            onProcessExitedRef.current?.(terminalId)
+            term.write(
+              `\r\n\x1b[31m[Failed to start terminal: ${err}]\x1b[0m\r\n`
+            )
+          }
+        } finally {
+          if (!cancelled) setLoading(false)
+        }
+      }
+
+      // If unmounted while spawn was in flight, clean up the spawned PTY.
+      // NOT in attach mode: there the PTY belongs to the card that placed it,
+      // not to this mount — that is the whole point of attaching, and killing
+      // here would take a running command down with a view switch.
+      if (cancelled) {
+        if (!attach) terminalKill(terminalId).catch(() => {})
+        teardown()
+        return
+      }
+
+      bootstrapping = false
+      if (readyDuringStartup) syncFromBackend()
 
       // Only fit when terminal is actually visible/active.
       requestAnimationFrame(() => {
@@ -427,12 +799,14 @@ export function TerminalView({
         onResizeDisposable.dispose()
         unlisten()
         unlistenExit()
+        unlistenReconnect?.()
         resizeObserver.disconnect()
         term.dispose()
         fitAddonRef.current = null
         termRef.current = null
         ligaturesAddonRef.current = null
         lastResizeRef.current = null
+        if (replayGateRef.current === replays) replayGateRef.current = null
       }
     }
 
@@ -441,15 +815,24 @@ export function TerminalView({
     return () => {
       cancelled = true
       cleanup?.()
+      // A click held for the menu belongs to the terminal that was clicked;
+      // when this effect re-runs for another terminal (or unmounts) the
+      // menu must not outlive it and open the old terminal's link.
+      setLinkClick(null)
     }
-  }, [terminalId, workingDir, shell, initialCommand])
+  }, [terminalId, workingDir, shell, initialCommand, attach])
 
   // Refit and focus when becoming active or panel becomes visible
   useEffect(() => {
     if (isActive && isVisible) {
       requestAnimationFrame(() => {
         const el = containerRef.current
-        if (el && el.clientWidth > 0 && el.clientHeight > 0) {
+        if (
+          el &&
+          el.clientWidth > 0 &&
+          el.clientHeight > 0 &&
+          !replayGateRef.current?.pending
+        ) {
           fitAddonRef.current?.fit()
         }
         termRef.current?.focus()
@@ -472,7 +855,12 @@ export function TerminalView({
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         const el = containerRef.current
-        if (el && el.clientWidth > 0 && el.clientHeight > 0) {
+        if (
+          el &&
+          el.clientWidth > 0 &&
+          el.clientHeight > 0 &&
+          !replayGateRef.current?.pending
+        ) {
           fitAddonRef.current?.fit()
         }
       })
@@ -532,6 +920,20 @@ export function TerminalView({
           />
         )}
       </div>
+      <TerminalLinkMenu
+        click={linkClick}
+        onChoose={(url, target) => {
+          setLinkClick(null)
+          openUrlTargetRef.current(url, {
+            source: "terminal",
+            forceTarget: target,
+          })
+        }}
+        onClose={() => {
+          setLinkClick(null)
+          termRef.current?.focus()
+        }}
+      />
       {loading && isActive && (
         <div className="absolute inset-0 flex items-center justify-center bg-background/80">
           <div className="flex items-center gap-2 text-sm text-muted-foreground">

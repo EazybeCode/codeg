@@ -30,6 +30,15 @@ import {
   useAuxPanelContext,
 } from "@/contexts/aux-panel-context"
 import { BranchDropdown } from "@/components/layout/branch-dropdown"
+vi.mock("@/contexts/workspace-context", () => ({
+  useWorkspaceActions: () => ({ toggleConversationMaximized: vi.fn() }),
+  useWorkspaceView: () => ({
+    mode: "conversation",
+    activePane: "conversation",
+    filesMaximized: false,
+    conversationMaximized: false,
+  }),
+}))
 const call = vi.hoisted(() => vi.fn())
 vi.mock("@/lib/transport", () => ({
   getTransport: () => ({ call }),

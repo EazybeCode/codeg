@@ -50,5 +50,6 @@ fn agent() -> crate::acp::types::AcpAgentInfo {
         codex_model_catalog: None, codex_sandbox_settings: None, cline_secrets_json: None, hermes_config_yaml: None,
         grok_config_toml: None, grok_settings: None, cursor_cli_config_json: None, cursor_settings: None,
         model_provider_id: None, icon_url: None,
+        install_url: None, supports_self_update: false, claude_model_picker: None,
     }
 }

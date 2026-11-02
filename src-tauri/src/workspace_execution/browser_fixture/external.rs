@@ -106,7 +106,7 @@ impl WorkspaceRunner for External {
         tokio::spawn(async move {
             while let Some(command) = rx.recv().await {
                 match command {
-                    ConnectionCommand::Prompt { blocks, user_message } => {
+                    ConnectionCommand::Prompt { blocks, user_message, .. } => {
                         let (message_id, user_blocks) = user_message.expect("real linked prompt carries client ID");
                         let prompt = blocks.iter().filter_map(|b| match b { PromptInputBlock::Text { text } => Some(text.as_str()), _ => None }).collect::<Vec<_>>().join("\n");
                         let answer = format!("# Generated Markdown\n\n{prompt}\n");

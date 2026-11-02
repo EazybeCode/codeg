@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react"
+import { render, screen } from "@testing-library/react"
 import { NextIntlClientProvider } from "next-intl"
 import { afterEach, expect, it, vi } from "vitest"
 import messages from "@/i18n/messages/en.json"
@@ -34,9 +34,10 @@ it("selects the actual native login entry from the server DTO without mounting o
   expect(
     await screen.findByRole("button", { name: "Continue with Google" })
   ).toBeVisible()
-  await waitFor(() =>
-    expect(screen.getByRole("button", { name: /GitHub/ })).toBeDisabled()
-  )
+  // The release hides GitHub on sign-in; its disabled placeholder is
+  // reserved for linking methods in Settings.
+  expect(screen.queryByRole("button", { name: /GitHub/ })).toBeNull()
+  expect(screen.getByLabelText("Email address")).toBeEnabled()
   expect(mounted).toEqual([])
   expect(mock.unknown).toEqual([])
   expect(() => getTransport()).toThrow(/not available/)

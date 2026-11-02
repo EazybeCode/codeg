@@ -4,7 +4,13 @@ import { useMemo } from "react"
 import { useWorkspaceCatalogContext } from "@/components/workspace/workspace-catalog-provider"
 import { isCatalogWorkspaceMode } from "@/lib/workspace-catalog-mode"
 import { useAppWorkspaceStore } from "@/stores/app-workspace-store"
-import { groupOfTab, useTabStore, type TabItem } from "@/stores/tab-store"
+import {
+  groupOfTab,
+  useTabStore,
+  useVisibleConversationTabs,
+  useVisibleConversationLayout,
+  type TabItem,
+} from "@/stores/tab-store"
 import type { FolderDetail } from "@/lib/types"
 import { leafIds, normalizeTree, type LayoutNode } from "@/lib/tab-group-layout"
 
@@ -103,5 +109,29 @@ export function useWorkspacePresentationGroups(tabs: TabItem[]): {
         groupSelection
       ),
     [tabs, groupLayout, groupOf, groupSelection]
+  )
+}
+
+/** Visible tabs combine the catalog boundary with the active folder scope. */
+export function useVisibleWorkspacePresentationTabs(): TabItem[] {
+  const presented = useWorkspacePresentationTabs()
+  const visible = useVisibleConversationTabs()
+  return useMemo(() => {
+    const visibleIds = new Set(visible.map((tab) => tab.id))
+    return presented.filter((tab) => visibleIds.has(tab.id))
+  }, [presented, visible])
+}
+
+export function useVisibleWorkspacePresentationLayout(): LayoutNode {
+  const tabs = useVisibleWorkspacePresentationTabs()
+  const layout = useVisibleConversationLayout()
+  const groupOf = useTabStore((state) => state.groupOf)
+  return useMemo(
+    () =>
+      normalizeTree(
+        layout,
+        new Set(tabs.map((tab) => groupOfTab(groupOf, layout, tab.id)))
+      ),
+    [tabs, layout, groupOf]
   )
 }

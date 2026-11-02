@@ -67,6 +67,10 @@ pub struct WorkTaskInfo {
     /// Planned start of a to-do task (`None` = no plan). Cleared the moment the
     /// task is claimed, by the scheduler or by hand.
     pub scheduled_at: Option<DateTime<Utc>>,
+    /// The user put this settled (review / failed) task aside to handle later:
+    /// the board files it under Done until they pick it back up. `None` = not
+    /// put aside. Cleared by every transition out of review / failed.
+    pub deferred_at: Option<DateTime<Utc>>,
     /// Forge provenance ('forge_issue' | 'forge_pr'); `None` = not forge-sourced.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_kind: Option<String>,
@@ -76,10 +80,24 @@ pub struct WorkTaskInfo {
     /// Source snapshot (URL, title, account id …), parsed from the row's JSON.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_meta: Option<serde_json::Value>,
-    /// Latest `agent_progress` milestone (filled by `list` for live tasks only
-    /// — the card's realtime progress line).
+    /// Where a task WITHOUT forge provenance delivered its work, and the pull
+    /// request it opened (`forge::WorkTaskDelivery`), parsed from the row's
+    /// JSON. `None` until such a task is first delivered, and always on a
+    /// forge-sourced task — that one's pull request is `source_meta.result_pr`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<serde_json::Value>,
+    /// Latest `agent_progress` milestone OF THIS GENERATION (filled by `list`
+    /// for live tasks only — the card's realtime progress line). Scoped by
+    /// `run_seq`: a retry, a follow-up and a merge each start a new one, and
+    /// the previous round's last milestone is not this round's news.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latest_progress: Option<String>,
+    /// This generation is parked on its pre-prompt context compaction — the
+    /// agent is working, but on shrinking the session rather than on the task.
+    /// Filled by `list` alongside `latest_progress`, and the only thing that
+    /// explains a card sitting in `preparing`/`merging` for minutes.
+    #[serde(default)]
+    pub compacting: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub started_at: Option<DateTime<Utc>>,
@@ -174,6 +192,18 @@ pub struct WorkTaskConfig {
     /// config written by a newer build must still launch here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deliverable: Option<String>,
+    /// The branch this task is FOR: its worktree branches from that branch's
+    /// tip, and the merge lands back onto it. `None` — every task created
+    /// before this existed included — keeps the original behaviour: whatever
+    /// the project folder is checked out on when the task is claimed. A
+    /// pull-request task ignores it; its base comes from the pull request.
+    ///
+    /// Only the request lives here. The branch actually used is recorded on
+    /// `work_task.base_branch` when the worktree is created, and everything
+    /// downstream (merge, delivery, diff baseline) reads that column — so
+    /// editing this afterwards cannot re-base a task that already ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_branch: Option<String>,
 }
 
 /// The one recognized [`WorkTaskConfig::deliverable`] value.
@@ -396,8 +426,10 @@ pub struct WorkTaskMergeState {
     /// Land only: "squash" | "merge"
     #[serde(default)]
     pub strategy: String,
-    /// Whether the user asked to delete the worktree after landing — persisted
-    /// so crash recovery can honor the choice when it back-fills `done`.
+    /// Whether the user asked to delete the worktree after landing — or, on a
+    /// delivery, after it settles `done` — persisted so crash recovery can
+    /// honor the choice when it back-fills `done`. Never set together with
+    /// `keep_in_review`: a task that stays in review keeps its checkout.
     #[serde(default)]
     pub delete_worktree: bool,
     /// The agent writes the commit message itself (`message` is empty then).
@@ -423,6 +455,25 @@ pub struct WorkTaskMergeState {
     /// Delivery only: open the pull request as a draft.
     #[serde(default)]
     pub draft: bool,
+    /// Delivery only: the user chose NOT to finish the task with this
+    /// delivery, so it settles back to review — the pull request recorded on
+    /// the row, the worktree kept — instead of to `done`, and its next
+    /// delivery pushes into that same pull request. `false` on every row
+    /// written before the choice existed, which is what they all did.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub keep_in_review: bool,
+    /// Delivery only, and only for a task without forge provenance: the
+    /// repository and account this delivery pushes with. Persisted because
+    /// such a task has nothing else naming them until its first delivery
+    /// settles — crash recovery must ask the same forge, as the same account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<crate::forge::DeliveryTarget>,
+    /// Delivery only: the pull request this delivery pushes INTO — the one an
+    /// earlier delivery opened and the task stayed in review after. Absent
+    /// when it opens (or adopts by branch) a pull request instead, and on a
+    /// pull-request task, whose number is part of its own identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_number: Option<i64>,
 }
 
 /// A merge the user asked for while the folder's one merge slot was busy,

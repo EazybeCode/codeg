@@ -1,5 +1,6 @@
 // src/lib/appearance-script.ts
 
+import { THEME_COLOR_DARK, THEME_COLOR_LIGHT } from "./theme-color"
 /**
  * Storage keys for appearance preferences.
  * 与 Provider 共享，确保 inline 脚本和 React 层读写同一份数据。
@@ -10,6 +11,9 @@ export const STORAGE_KEY_ZOOM_LEVEL = "codeg-zoom-level"
 // 新会话欢迎页「模式选择区域」（代码开发 / 日常办公 快捷卡片）是否显示。
 // 缺省即回退为开启（保持历史行为）；仅在欢迎态客户端渲染，无需预水合。
 export const STORAGE_KEY_WELCOME_QUICK_ACTIONS = "codeg-welcome-quick-actions"
+
+export const STORAGE_KEY_CHAT_ANIMATIONS = "codeg-chat-animations"
+export const STORAGE_KEY_CHAT_CONTENT_WIDTH = "codeg-chat-content-width"
 
 // 字体偏好（界面 / 编辑器 / 终端）。预水合阶段不知道浏览器服务器模式，因此不读取
 // 这些值；确认 operator/native 后由 AppearanceProvider 恢复。*_FONT 存 id、
@@ -40,6 +44,16 @@ export const STORAGE_KEY_WORKSPACE_BG_PANEL_OPACITY =
 // 写/换/删图后 bump，让 workspace 窗口经 storage 事件重新读盘。不需预水合。
 export const STORAGE_KEY_WORKSPACE_BG_IMAGE_VERSION =
   "codeg-workspace-bg-image-version"
+// 壁纸市场：当前背景的来源页（https://wallhaven.cc/w/<id>），仅用于市场卡片的
+// 「使用中」标记。本地选图 / 移除背景时清除；不参与渲染，丢了也只是标记失灵。
+//
+// 它和图片本身是两份状态，只在同一次操作里前后脚写，并非事务。同一个界面里
+// 换图是单飞的（市场对话框全网格禁用，本地选图有 busy 闸），但两个窗口/标签页
+// 同时换图时，最后落盘的图和最后写的标记可能来自不同的那一次 —— 图仍然是完整
+// 的一张（后端按写者独立暂存 + 原子 rename），错的只是「使用中」指向谁。要根治
+// 得把来源页跟图一起存到磁盘上，那是后端的形状改动，不在本次范围内。
+export const STORAGE_KEY_WORKSPACE_BG_SOURCE_URL =
+  "codeg-workspace-bg-source-url"
 
 // 自定义样式（外观设置页）。全部延迟到确认 operator/native 后再恢复；能力判断前
 // 注入自由 CSS 或 URL 的安全风险高于已确认旧模式中一帧的样式变化。
@@ -96,6 +110,19 @@ const SCRIPT = `
     } else {
       document.documentElement.style.colorScheme = "light";
       document.documentElement.style.backgroundColor = "";
+    }
+
+    // theme-color（浏览器界面 / 安卓已安装应用的状态栏与导航栏）：layout 按
+    // prefers-color-scheme 各出一个 <meta>，跟随系统时无需处理；用户在应用内选了
+    // 明/暗时两个都改成该模式的颜色，否则系统偏好会盖过应用内的选择。
+    // 首帧之后由 ThemeProvider 接管，含 Next 导航重建 <head> 之后的重新写入。
+    if (storedMode === "dark" || storedMode === "light") {
+      try {
+        var metaThemes = document.querySelectorAll('meta[name="theme-color"]');
+        for (var m = 0; m < metaThemes.length; m++) {
+          metaThemes[m].setAttribute("content", isDark ? "${THEME_COLOR_DARK}" : "${THEME_COLOR_LIGHT}");
+        }
+      } catch (e) {}
     }
 
     // Deliberately stop at the allowlisted theme, color and zoom subset.

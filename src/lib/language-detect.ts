@@ -188,6 +188,15 @@ export function isImageFile(path: string): boolean {
   return IMAGE_EXTENSIONS.has(ext)
 }
 
+// Images git can only diff as binary — the ones a text diff has nothing to say
+// about, so the diff surfaces render them as pictures instead. `.svg` is
+// deliberately excluded: it is text, `git diff` produces a real line diff for
+// it, and that diff says more than two pictures that may look identical.
+export function isBinaryImageFile(path: string): boolean {
+  const ext = path.split(".").pop()?.toLowerCase() ?? ""
+  return ext !== "svg" && IMAGE_EXTENSIONS.has(ext)
+}
+
 // HTML documents we can render in the in-app sandboxed preview. Scoped to real
 // .html/.htm files — .vue/.svelte also map to the "html" language but are not
 // standalone, renderable documents.
@@ -198,6 +207,18 @@ export function isHtmlPreviewable(path: string | null | undefined): boolean {
   if (dot === -1) return false
   const ext = basename.slice(dot + 1)
   return ext === "html" || ext === "htm"
+}
+
+// PDF documents, rendered in the in-app PDF.js viewer. Binary like images:
+// they load as a base64 `data:` URL and carry no etag, so callers branch on
+// this before any etag-based disk reconciliation. Preview-only — there is no
+// text editor view.
+export function isPdfFile(path: string | null | undefined): boolean {
+  if (!path) return false
+  const basename = path.toLowerCase().split(/[\\/]/).pop() ?? ""
+  const dot = basename.lastIndexOf(".")
+  if (dot === -1) return false
+  return basename.slice(dot + 1) === "pdf"
 }
 
 // Office documents (.docx/.xlsx/.pptx) we can render in the in-app preview via

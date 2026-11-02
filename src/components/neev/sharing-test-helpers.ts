@@ -14,11 +14,12 @@ export type TestMember = {
  * opaque cursor (the next index). Install AFTER `mockNativeSession`.
  */
 export function serveDirectory(members: TestMember[]) {
-  const fetcher = globalThis.fetch as unknown as ReturnType<typeof vi.fn>
+  const fetcher = vi.mocked(globalThis.fetch)
   const original = fetcher.getMockImplementation()!
   const queries: Record<string, string | null>[] = []
-  fetcher.mockImplementation(async (path: string, init: RequestInit = {}) => {
+  fetcher.mockImplementation(async (path, init: RequestInit = {}) => {
     if (
+      typeof path === "string" &&
       (init.method ?? "GET") === "GET" &&
       path.startsWith("/api/neev/organization/directory")
     ) {

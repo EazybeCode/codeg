@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import {
   APPEARANCE_INIT_SCRIPT,
+  STORAGE_KEY_CHAT_ANIMATIONS,
+  STORAGE_KEY_CHAT_CONTENT_WIDTH,
   STORAGE_KEY_CUSTOM_CSS,
   STORAGE_KEY_CUSTOM_CSS_ENABLED,
   STORAGE_KEY_CUSTOM_THEME,
@@ -12,6 +14,12 @@ import {
   STORAGE_KEY_ZOOM_LEVEL,
 } from "./appearance-script"
 import { CUSTOM_CSS_ELEMENT_ID } from "./custom-style"
+import {
+  THEME_COLOR_DARK,
+  THEME_COLOR_LIGHT,
+  THEME_COLOR_MEDIA_DARK,
+  THEME_COLOR_MEDIA_LIGHT,
+} from "./theme-color"
 
 function runInitScript() {
   ;(0, eval)(APPEARANCE_INIT_SCRIPT)
@@ -22,8 +30,12 @@ function resetDocument() {
   root.removeAttribute("style")
   root.removeAttribute("data-theme")
   root.removeAttribute("data-workspace-bg")
+  root.removeAttribute("data-chat-animations")
   root.classList.remove("dark")
   document.getElementById(CUSTOM_CSS_ELEMENT_ID)?.remove()
+  document
+    .querySelectorAll('meta[name="theme-color"]')
+    .forEach((tag) => tag.remove())
 }
 
 beforeEach(() => {
@@ -112,4 +124,105 @@ describe("APPEARANCE_INIT_SCRIPT safe pre-hydration subset", () => {
     expect(localStorage.getItem(STORAGE_KEY_CUSTOM_CSS_ENABLED)).toBe("1")
     expect(localStorage.getItem(STORAGE_KEY_CUSTOM_CSS)).toBe(css)
   })
+})
+
+/**
+ * 静态 HTML 里按 prefers-color-scheme 各有一个 theme-color 标签（layout 的
+ * viewport.themeColor）。应用内显式选了明/暗时，首帧前就要让两个都换成该模式的
+ * 颜色，否则安卓已安装应用的状态栏按系统偏好着色，和界面反着来。
+ */
+describe("APPEARANCE_INIT_SCRIPT — theme-color", () => {
+  function addSchemeTags() {
+    for (const [media, color] of [
+      [THEME_COLOR_MEDIA_LIGHT, THEME_COLOR_LIGHT],
+      [THEME_COLOR_MEDIA_DARK, THEME_COLOR_DARK],
+    ]) {
+      const tag = document.createElement("meta")
+      tag.setAttribute("name", "theme-color")
+      tag.setAttribute("media", media)
+      tag.setAttribute("content", color)
+      document.head.appendChild(tag)
+    }
+  }
+
+  function contents() {
+    return Array.from(
+      document.querySelectorAll('meta[name="theme-color"]'),
+      (tag) => tag.getAttribute("content")
+    )
+  }
+
+  it("paints both tags dark for an explicit dark choice on a light OS", () => {
+    addSchemeTags()
+    localStorage.setItem("theme", "dark")
+
+    runInitScript()
+
+    expect(contents()).toEqual([THEME_COLOR_DARK, THEME_COLOR_DARK])
+  })
+
+  it("paints both tags light for an explicit light choice on a dark OS", () => {
+    addSchemeTags()
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn().mockReturnValue({ matches: true }) as unknown as typeof matchMedia
+    )
+    localStorage.setItem("theme", "light")
+
+    runInitScript()
+
+    expect(contents()).toEqual([THEME_COLOR_LIGHT, THEME_COLOR_LIGHT])
+  })
+
+  it("leaves the per-scheme tags to the browser when following the system", () => {
+    addSchemeTags()
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn().mockReturnValue({ matches: true }) as unknown as typeof matchMedia
+    )
+    localStorage.setItem("theme", "system")
+
+    runInitScript()
+
+    expect(document.documentElement.classList.contains("dark")).toBe(true)
+    expect(contents()).toEqual([THEME_COLOR_LIGHT, THEME_COLOR_DARK])
+  })
+})
+
+describe("APPEARANCE_INIT_SCRIPT — chat area", () => {
+  const root = () => document.documentElement
+  const chatWidth = () => root().style.getPropertyValue("--chat-content-width")
+
+  it("defers stored animation choices until the operator provider mounts", () => {
+    runInitScript()
+    expect(root().hasAttribute("data-chat-animations")).toBe(false)
+
+    localStorage.setItem(STORAGE_KEY_CHAT_ANIMATIONS, "1")
+    runInitScript()
+    expect(root().hasAttribute("data-chat-animations")).toBe(false)
+
+    localStorage.setItem(STORAGE_KEY_CHAT_ANIMATIONS, "0")
+    runInitScript()
+    expect(root()).not.toHaveAttribute("data-chat-animations")
+    expect(localStorage.getItem(STORAGE_KEY_CHAT_ANIMATIONS)).toBe("0")
+  })
+
+  it("defers stored chat width while applying the allowlisted zoom", () => {
+    localStorage.setItem(STORAGE_KEY_CHAT_CONTENT_WIDTH, "900")
+    localStorage.setItem(STORAGE_KEY_ZOOM_LEVEL, "200")
+    runInitScript()
+    expect(chatWidth()).toBe("")
+    expect(localStorage.getItem(STORAGE_KEY_CHAT_CONTENT_WIDTH)).toBe("900")
+    // Chat preferences survive untouched for the confirmed operator branch.
+    expect(root().style.fontSize).toBe("32px")
+  })
+
+  it.each(["", "abc", "0", "-5", "99999"])(
+    "leaves the default width for a stored %j",
+    (raw) => {
+      localStorage.setItem(STORAGE_KEY_CHAT_CONTENT_WIDTH, raw)
+      runInitScript()
+      expect(chatWidth()).toBe("")
+    }
+  )
 })

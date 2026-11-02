@@ -4,6 +4,11 @@ import { useEffect } from "react"
 import { useRouter } from "next/navigation"
 import { isDesktop } from "@/lib/platform"
 import { useTeamMode } from "@/components/team/team-mode-boundary"
+import {
+  codegAuthHeaders,
+  probeProxyAuthentication,
+  unauthorizedSource,
+} from "@/lib/transport/web-auth"
 
 function OperatorEntry() {
   const router = useRouter()
@@ -15,7 +20,12 @@ function OperatorEntry() {
     // Web mode: validate token before entering app
     const token = localStorage.getItem("codeg_token")
     if (!token) {
-      router.replace("/login")
+      // A proxy in front of Codeg may have signed the user in already
+      // (CODEG_AUTH=proxy-jwt); an unreachable server leaves that to the
+      // in-app connection dialog, as with a token.
+      void probeProxyAuthentication().then((result) => {
+        router.replace(result === "unauthorized" ? "/login" : "/workspace")
+      })
       return
     }
     // Verify token is still valid
@@ -23,7 +33,7 @@ function OperatorEntry() {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
+        ...codegAuthHeaders(token),
       },
       body: "{}",
     })
@@ -32,14 +42,18 @@ function OperatorEntry() {
           router.replace("/workspace")
           return
         }
-        if (res.status === 401) {
+        if (
+          res.status === 401 &&
+          unauthorizedSource(res.headers.get("www-authenticate")) === "codeg"
+        ) {
           // Token genuinely rejected → clear it and re-authenticate.
           localStorage.removeItem("codeg_token")
           router.replace("/login")
           return
         }
-        // Server reachable but unhealthy (5xx / proxy error). Keep the token
-        // and enter the app; the in-app reconnect dialog handles recovery
+        // Server reachable but unhealthy (5xx / proxy error), or a proxy in
+        // front of Codeg refused (its own session expired). Keep the token
+        // and enter the app; the in-app connection dialog handles recovery
         // instead of bouncing a valid session to /login.
         router.replace("/workspace")
       })

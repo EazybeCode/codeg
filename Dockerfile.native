@@ -11,7 +11,7 @@ RUN pnpm install --frozen-lockfile --ignore-scripts
 COPY src/ ./src/
 COPY tools/neev-browser/extension/lib/signin.js ./tools/neev-browser/extension/lib/signin.js
 COPY public/ ./public/
-COPY components.json next.config.ts postcss.config.mjs tsconfig.json ./
+COPY components.json next.config.ts postcss.config.mjs tsconfig.json tsconfig.build.json ./
 
 # Dependency lifecycle hooks stay disabled. This is the inspected root hook that
 # installs Monaco's static assets, followed by the existing static-export build.
@@ -51,7 +51,8 @@ COPY src-tauri/src/ ./src/
 COPY src-tauri/resources/ ./resources/
 COPY src-tauri/experts/ ./experts/
 COPY src-tauri/science/ ./science/
-COPY src-tauri/vendor/sacp-tokio/ ./vendor/sacp-tokio/
+COPY src-tauri/genui/ ./genui/
+COPY src/browser-injected/ /app/src/browser-injected/
 
 RUN cargo build \
       --locked \

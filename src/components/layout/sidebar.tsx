@@ -1,10 +1,18 @@
 "use client"
 
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react"
 import {
   Crosshair,
   ChevronDown,
   Eye,
+  FolderSync,
   ListChevronsDownUp,
   ListChevronsUpDown,
   LayoutTemplate,
@@ -20,6 +28,7 @@ import { useSidebarContext } from "@/contexts/sidebar-context"
 import { useAutomationsView } from "@/contexts/automations-view-context"
 import { useTasksView } from "@/contexts/tasks-view-context"
 import { useWorkbenchRoute } from "@/contexts/workbench-route-context"
+import { useFolderTabsStore } from "@/stores/folder-tabs-store"
 import {
   SidebarConversationList,
   type SidebarConversationListHandle,
@@ -46,6 +55,8 @@ import { leftChromeReserve } from "@/lib/window-chrome"
 import {
   isNavItemVisible,
   loadNavItemVisibility,
+  loadTagFilter,
+  saveTagFilter,
   loadShowCompleted,
   loadShowRecent,
   loadShowWorktrees,
@@ -66,6 +77,17 @@ import {
   type SidebarSortMode,
   type SidebarSectionOrder,
 } from "@/lib/sidebar-view-mode-storage"
+import { useCanvasBoardsStore } from "@/stores/canvas-boards-store"
+import { useConversationTagsStore } from "@/stores/conversation-tags-store"
+import {
+  EMPTY_TAG_FILTER,
+  pruneTagFilter,
+  type TagFilter,
+} from "@/lib/conversation-tags"
+import {
+  SidebarTagFilterBar,
+  SidebarTagFilterSubmenu,
+} from "@/components/conversations/sidebar-tag-filter"
 import { SidebarSectionOrderControl } from "./sidebar-section-order-control"
 import { WorkspaceIdentity } from "./workspace-identity"
 import { useWorkspaceCatalogContext } from "@/components/workspace/workspace-catalog-provider"
@@ -164,9 +186,30 @@ export function Sidebar() {
     DEFAULT_SECTION_ORDER
   )
   const [allExpanded, setAllExpanded] = useState(true)
-  // General umbrella name for the eye menu (list toggles + nav rows + sort +
-  // section order). Kept generic so the accessible name / tooltip stays
-  // accurate as the menu gains options.
+  // Not a list preference like the rows above: it decides which conversation
+  // and file tabs the window shows. Its store owns the stored value (hydrated
+  // with the tab set, see `TabProvider`), so this reads it live.
+  const tabsFollowFolder = useFolderTabsStore((s) => s.enabled)
+  const setTabsFollowFolder = useFolderTabsStore((s) => s.setEnabled)
+  // Controlled only so the tag filter's "Manage tags…" can close the menu on
+  // its way to the dialog: that entry is a plain button in a panel, not a menu
+  // item, so it does not close the menu by itself.
+  const [viewOptionsOpen, setViewOptionsOpen] = useState(false)
+  // What the user picked, persisted as picked. The list gets it PRUNED to tags
+  // that still exist (below) — but only once the tag list has loaded: matching
+  // needs nothing but ids, so a persisted filter applies from the first paint
+  // instead of flashing the whole list and then narrowing it.
+  const [rawTagFilter, setRawTagFilter] = useState<TagFilter>(EMPTY_TAG_FILTER)
+  const tagsById = useConversationTagsStore((s) => s.tagsById)
+  const tagsHydrated = useConversationTagsStore((s) => s.hydrated)
+  const tagFilter = useMemo(
+    () =>
+      tagsHydrated ? pruneTagFilter(rawTagFilter, tagsById) : rawTagFilter,
+    [rawTagFilter, tagsById, tagsHydrated]
+  )
+  // General umbrella name for the eye menu (tag filter + list toggles + nav
+  // rows + sort + section order). Kept generic so the accessible name / tooltip
+  // stays accurate as the menu gains options.
   const viewOptionsLabel = t("viewOptions")
   const toggleExpandLabel = allExpanded
     ? t("collapseAllGroups")
@@ -182,7 +225,15 @@ export function Sidebar() {
     setNavItems(loadNavItemVisibility())
     setSortMode(loadSortMode())
     setSectionOrder(loadSectionOrder())
+    setRawTagFilter(loadTagFilter())
   }, [])
+
+  const handleSetTagFilter = useCallback((next: TagFilter) => {
+    setRawTagFilter(next)
+    saveTagFilter(next)
+  }, [])
+
+  const closeViewOptions = useCallback(() => setViewOptionsOpen(false), [])
 
   const handleSetShowCompleted = useCallback((value: boolean) => {
     setShowCompleted(value)
@@ -322,7 +373,10 @@ export function Sidebar() {
                 />
               )}
             </Button>
-            <DropdownMenu>
+            <DropdownMenu
+              open={viewOptionsOpen}
+              onOpenChange={setViewOptionsOpen}
+            >
               <DropdownMenuTrigger asChild>
                 <Button
                   variant="ghost"
@@ -331,9 +385,10 @@ export function Sidebar() {
                   title={viewOptionsLabel}
                   aria-label={viewOptionsLabel}
                 >
-                  {/* An eye, not a funnel: nothing in this menu filters the list
-                    down to matches — every option decides what is shown and in
-                    what order. */}
+                  {/* An eye, not a funnel: the menu as a whole decides what the
+                    list shows and in what order. Its one filter, by tags, wears
+                    the funnel on its own row, and a filter that is on announces
+                    itself in the strip above the list. */}
                   <Eye aria-hidden="true" className="h-3.5 w-3.5" />
                 </Button>
               </DropdownMenuTrigger>
@@ -342,20 +397,32 @@ export function Sidebar() {
                 clips overflow-x — 48 would start truncating longer localized
                 section names. */}
               <DropdownMenuContent align="end" className="min-w-56">
-                {/* Four groups: what the list shows → which nav rows exist → how
-                  the list is sorted → how its sections are stacked. The first
-                  two are hover-opened submenus rather than inline blocks: they
-                  are set-and-forget on/off inventories, six checkboxes between
-                  them, and inlining all six left a fifteen-row menu with Sort
-                  by / Section order — the two settings people actually come
-                  back for — stranded at the bottom of it. Those two stay
-                  inline: a pair of radios and a ranked list read wrong behind
-                  another hop, and the order rows need this menu's width.
+                {/* Five groups: what the list shows → which nav rows exist →
+                  which tabs the window shows → how the list is sorted → how its
+                  sections are stacked. The first group is the tag filter plus
+                  the list toggles, and those and the nav rows are hover-opened
+                  submenus rather than inline blocks. The two inventories are
+                  set-and-forget on/off sets, six checkboxes between them, and
+                  inlining all six left a fifteen-row menu with Sort by /
+                  Section order — the two settings people actually come back for
+                  — stranded at the bottom of it. The tag filter, which people
+                  come back for too, leads the menu instead: it is a whole panel
+                  (search, match mode, tag list) that only a submenu has room
+                  for. Sort by and Section order stay inline: a pair of radios
+                  and a ranked list read wrong behind another hop, and the order
+                  rows need this menu's width. Tabs-follow-folder is one inline
+                  checkbox: a single switch, and the sidebar is where it is used
+                  (clicking a folder header then selects that folder's tabs).
                   Every option keeps the menu open on select (the default is to
                   close): this menu is a settings panel, not a command list, and
                   flipping two of them used to cost two round trips through the
                   trigger. The one action it used to carry — expand/collapse
                   all — is now a header button of its own. */}
+                <SidebarTagFilterSubmenu
+                  filter={tagFilter}
+                  onChange={handleSetTagFilter}
+                  onCloseMenu={closeViewOptions}
+                />
                 <DropdownMenuSub>
                   <DropdownMenuSubTrigger>
                     <MessagesSquare className="text-muted-foreground" />
@@ -419,6 +486,16 @@ export function Sidebar() {
                   </DropdownMenuSubContent>
                 </DropdownMenuSub>
                 <DropdownMenuSeparator />
+                <DropdownMenuCheckboxItem
+                  checked={tabsFollowFolder}
+                  onCheckedChange={setTabsFollowFolder}
+                  onSelect={(event) => event.preventDefault()}
+                  title={t("tabsFollowFolderHint")}
+                >
+                  <FolderSync className="text-muted-foreground" />
+                  {t("tabsFollowFolder")}
+                </DropdownMenuCheckboxItem>
+                <DropdownMenuSeparator />
                 <DropdownMenuLabel>{t("sortBy")}</DropdownMenuLabel>
                 <DropdownMenuRadioGroup
                   value={sortMode}
@@ -451,7 +528,6 @@ export function Sidebar() {
       </div>
 
       <WorkspaceIdentity state={catalog?.identity} />
-
       {/* On mobile, clicking a conversation card auto-closes the Drawer */}
       <div
         className="flex flex-col flex-1 min-h-0 overflow-hidden pt-1.5"
@@ -471,14 +547,21 @@ export function Sidebar() {
             <WorkspaceCatalogSidebar />
           </div>
         ) : (
-          <SidebarConversationList
-            ref={listRef}
-            showCompleted={showCompleted}
-            showWorktrees={showWorktrees}
-            showRecent={showRecent}
-            sortMode={sortMode}
-            sectionOrder={sectionOrder}
-          />
+          <>
+            <SidebarTagFilterBar
+              filter={tagFilter}
+              onChange={handleSetTagFilter}
+            />
+            <SidebarConversationList
+              ref={listRef}
+              showCompleted={showCompleted}
+              showWorktrees={showWorktrees}
+              showRecent={showRecent}
+              sortMode={sortMode}
+              sectionOrder={sectionOrder}
+              tagFilter={tagFilter}
+            />
+          </>
         )}
       </div>
       {!catalog?.enabled && (
@@ -562,6 +645,9 @@ export function Sidebar() {
                 active={routeId === "canvas"}
                 onClick={() => {
                   if (isMobile) toggle()
+                  if (routeId === "canvas") {
+                    useCanvasBoardsStore.getState().closeBoard()
+                  }
                   setRoute("canvas")
                 }}
               />

@@ -11,6 +11,7 @@
 !next.config.ts
 !postcss.config.mjs
 !tsconfig.json
+!tsconfig.build.json
 
 !src/
 !src/**
@@ -29,9 +30,8 @@
 !src-tauri/experts/**
 !src-tauri/science/
 !src-tauri/science/**
-!src-tauri/vendor/
-!src-tauri/vendor/sacp-tokio/
-!src-tauri/vendor/sacp-tokio/**
+!src-tauri/genui/
+!src-tauri/genui/**
 
 !tools/
 !tools/neev-browser/

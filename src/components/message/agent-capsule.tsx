@@ -1,13 +1,10 @@
 "use client"
 
 /**
- * Shared visual shell for sub-agent capsules. Both the history "Agent" capsule
- * (`agent-tool-call.tsx`, reconstructed from the on-disk rollout) and the live
- * codex collab capsule (`collab-agent-card.tsx`, streamed) render through this
- * same chrome so the two are visually consistent: a collapsible pill trigger
- * (chevron + shimmering title while running + an optional right-aligned suffix)
- * over a bordered, scrollable body. Each caller supplies its own body for the
- * data it actually has.
+ * Visual shell for the live codex collab capsule (`collab-agent-card.tsx`,
+ * streamed): a collapsible pill trigger (chevron + shimmering title while
+ * running + an optional right-aligned suffix) over a bordered, scrollable body.
+ * The caller supplies its own body for the data it actually has.
  */
 
 import { Children, useState, type ReactNode } from "react"
@@ -19,7 +16,6 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/instant-collapsible"
-import { ScrollArea } from "@/components/ui/scroll-area"
 import { cn } from "@/lib/utils"
 
 interface AgentCapsuleProps {
@@ -35,6 +31,24 @@ interface AgentCapsuleProps {
    * title truncates first), so the capsule is identifiable at a glance.
    */
   idBadge?: ReactNode
+  /**
+   * How the sub-agent itself ended, as a compact chip inside the pill. Distinct
+   * from the pill's own running/error chrome, which describes the CALL: a codex
+   * spawn settles the moment the launch is acknowledged, long before the child
+   * it started is done. Sits in the pill rather than the body so it survives
+   * collapse — the state is the one thing worth seeing without a click.
+   */
+  stateBadge?: ReactNode
+  /**
+   * An action that belongs to the capsule rather than to its content — today,
+   * "open the child's own session". Rendered BESIDE the pill, not inside it:
+   * the pill is itself the collapsible trigger, so a nested button would be
+   * invalid, and an action buried in the body is unreachable while collapsed
+   * and absent entirely when there is no body (the live case, where the child's
+   * transcript is the only record there is). Mirrors the right-edge affordance
+   * `DelegationCardRow` gives every delegation card.
+   */
+  headerAction?: ReactNode
   /** Accessible label for the trigger. */
   statusLabel?: string
   /** Initial open state; defaults to open on error so failures are visible. */
@@ -48,6 +62,8 @@ export function AgentCapsule({
   isError,
   rightSuffix,
   idBadge,
+  stateBadge,
+  headerAction,
   statusLabel,
   defaultOpen,
   children,
@@ -115,6 +131,9 @@ export function AgentCapsule({
           {idBadge}
         </span>
       )}
+      {stateBadge != null && (
+        <span className="flex shrink-0 items-center">{stateBadge}</span>
+      )}
       {rightSuffix != null && (
         <span className="flex shrink-0 items-center text-muted-foreground/60">
           {rightSuffix}
@@ -123,10 +142,21 @@ export function AgentCapsule({
     </>
   )
 
+  // The pill's row. `headerAction` rides along here in every branch below, so
+  // the action sits in the same place whether the capsule is expanded,
+  // collapsed, or has no body at all — the three states a codex sub-agent moves
+  // through between live and reload.
+  const headerRow = (pill: ReactNode) => (
+    <div className="@container/agentcap flex w-full min-w-0 items-center gap-1.5">
+      {pill}
+      {headerAction}
+    </div>
+  )
+
   // Nothing to expand → a bare, non-interactive pill (no chevron, no bordered
   // frame). This is the fix for the empty sub-agent "white box".
   if (!hasBody) {
-    return (
+    return headerRow(
       <div className={pillClass} aria-label={statusLabel}>
         {pillInner}
       </div>
@@ -135,10 +165,12 @@ export function AgentCapsule({
 
   return (
     <Collapsible open={bodyOpen} onOpenChange={setBodyOpen} className="w-full">
-      {/* Pill trigger — matches ToolGroupPart structure with themed emphasis. */}
-      <CollapsibleTrigger className={pillClass} aria-label={statusLabel}>
-        {pillInner}
-      </CollapsibleTrigger>
+      {/* Pill trigger, with themed emphasis. */}
+      {headerRow(
+        <CollapsibleTrigger className={pillClass} aria-label={statusLabel}>
+          {pillInner}
+        </CollapsibleTrigger>
+      )}
 
       {/* Body — sits below the pill. Internal sections retain their own affordances. */}
       <CollapsibleContent
@@ -150,9 +182,14 @@ export function AgentCapsule({
         )}
       >
         <div className="mt-3 w-full overflow-hidden rounded-md border border-border/60">
-          <ScrollArea className="max-h-72">
+          {/* Native scrolling, like the transcript around it — not ScrollArea:
+              while the sub-agent runs, this body streams its live transcript
+              and a shimmer that rewrites its style every frame, and
+              OverlayScrollbars answers each DOM mutation with a synchronous
+              layout read (`scrollWidth` in its MutationObserver callback). */}
+          <div className="max-h-72 overflow-x-hidden overflow-y-auto scrollbar-thin">
             <div className="space-y-3 px-3.5 py-2">{children}</div>
-          </ScrollArea>
+          </div>
         </div>
       </CollapsibleContent>
     </Collapsible>

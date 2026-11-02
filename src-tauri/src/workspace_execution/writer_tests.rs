@@ -188,7 +188,7 @@ async fn workspace_execution_generic_cwd_and_conversation_cannot_bypass_managed_
         assert_eq!(acp_guard::reject_generic(&db.conn, Some(cwd), None, None).await.unwrap_err(), ExecutionError::Conflict);
         let manager = crate::acp::manager::ConnectionManager::new();
         let error = crate::commands::acp::acp_describe_agent_options_core(
-            &manager, &db, root.path(), AgentType::ClaudeCode, Some(cwd.to_string()),
+            &manager, &db, root.path(), AgentType::ClaudeCode, Some(cwd.to_string()), Default::default(),
         ).await.unwrap_err();
         assert!(error.to_string().contains("conflict"), "{error}");
         assert!(manager.connections.lock().await.is_empty(), "probe must not spawn in a managed checkout");

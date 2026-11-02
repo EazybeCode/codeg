@@ -8,6 +8,7 @@ import {
   DEFAULT_SECTION_ORDER,
   normalizeSectionOrder,
   type FolderSortMode,
+  type SidebarRecentFilter,
   type SidebarSortMode,
   type SidebarSectionKey,
   type SidebarSectionOrder,
@@ -19,7 +20,7 @@ import {
 // off the screen — a page keeps it a glance-able "where was I" list. Lives here
 // (not in the list component) because `buildRows` needs it to tell an untouched
 // first page from an expanded one.
-export const RECENT_PAGE_SIZE = 15
+export const RECENT_PAGE_SIZE = 10
 
 export function parseTimestamp(value: string): number {
   const timestamp = Date.parse(value)
@@ -134,6 +135,38 @@ export function formatRelative(iso: string, now: number): string {
   if (mo < 12) return `${mo}mo`
   const y = Math.floor(mo / 12)
   return `${y}y`
+}
+
+/**
+ * The timestamp a conversation row's relative time label reads.
+ *
+ * The label has to explain where its row sits, so it reads the stamp the row
+ * is ordered by:
+ * - Sub-sessions read `created_at`. They are creation-ordered under every
+ *   parent whatever the sidebar's `sortMode` says (see
+ *   {@link mergeChildrenById}), so the copies under a Recent parent also read
+ *   the same as their twins under the folder. Told apart by `parent_id`, the
+ *   card's own test, not by depth: a folder's own rows sit at depth 1 too
+ *   inside a folder group, and under Show worktrees.
+ * - Recent's and Chat's own rows read `updated_at`. Both sections order by
+ *   last activity whatever `sortMode` says (see
+ *   {@link selectRecentConversationsWithReuse} and
+ *   {@link selectChatConversationsWithReuse}). A Chat row is recognised by what
+ *   that bucket admits: a chat-kind conversation that is not pinned (a pinned
+ *   one sits in Pinned instead).
+ * - Every other row follows `sortMode`: the Folders rows, which are sorted by
+ *   it, and the Pinned rows, which are ordered by pin time, a stamp no label
+ *   shows.
+ */
+export function conversationRowTimestamp(
+  row: ConversationRow,
+  sortMode: SidebarSortMode
+): string {
+  const conv = row.conversation
+  if (conv.parent_id != null) return conv.created_at
+  if (row.recent) return conv.updated_at
+  if (conv.kind === "chat" && conv.pinned_at == null) return conv.updated_at
+  return sortMode === "updated" ? conv.updated_at : conv.created_at
 }
 
 function arraysShallowEqual<T>(a: readonly T[], b: readonly T[]): boolean {
@@ -281,8 +314,10 @@ export function selectPinnedWithReuse(
 
 /**
  * Select the folderless "chat mode" conversations (`kind === "chat"`) for the
- * flat "Chat" sidebar section. Sorted most-recently-updated first, with
- * reference reuse (same motivation as {@link selectPinnedWithReuse}).
+ * flat "Chat" sidebar section. Sorted most-recently-updated first whatever the
+ * sidebar's `sortMode` says, and labelled with that same stamp (see
+ * {@link conversationRowTimestamp}), with reference reuse (same motivation as
+ * {@link selectPinnedWithReuse}).
  *
  * Excludes pinned conversations (they surface in the Pinned section, an explicit
  * override) and — unless `showCompleted` — completed ones, matching how
@@ -308,9 +343,9 @@ export function selectChatConversationsWithReuse(
 
 /**
  * Select the flat "Recent" bucket: every conversation the sidebar can reach,
- * folder-bound and chat alike, newest first — the whole point of the section is
- * that it does NOT distinguish the two. Reference reuse as in
- * {@link selectPinnedWithReuse}.
+ * folder-bound and chat alike, most recently active first — the whole point
+ * of the section is that it does NOT distinguish the two. Reference reuse as
+ * in {@link selectPinnedWithReuse}.
  *
  * Deliberate inclusions / exclusions:
  * - Pinned conversations are excluded. They already have a dedicated top
@@ -325,28 +360,40 @@ export function selectChatConversationsWithReuse(
  *   screen (with no folder entry to theme or resolve them). Chat conversations
  *   live in a hidden folder that is never in the open set, so they are admitted
  *   by `kind` instead.
- * - Sorted by `sortMode` (not always `updated_at`) so the row order agrees with
- *   the timestamp each card actually shows.
+ * - Sorted by the last activity (`updated_at`) ALWAYS, never by the sidebar's
+ *   created/updated `sortMode` preference. A section called "Recent" that
+ *   ordered by `created_at` would bury a session created last month but used
+ *   this morning, which is exactly what the section exists to surface. Its
+ *   rows' time labels read the same stamp (see
+ *   {@link conversationRowTimestamp}), so the order and the label can never
+ *   disagree.
+ * - `filter` optionally narrows the mix to chats only, folder sessions only,
+ *   or the conversations `codeg-cli` started; the default (`"all"`) is the
+ *   section's whole point.
  *
  * `prev` is the array returned last call (threaded via a ref by the caller).
  */
 export function selectRecentConversationsWithReuse(
   conversations: readonly DbConversationSummary[],
   showCompleted: boolean,
-  sortMode: SidebarSortMode,
   openFolderIds: ReadonlySet<number>,
-  prev: DbConversationSummary[]
+  prev: DbConversationSummary[],
+  filter: SidebarRecentFilter = "all"
 ): DbConversationSummary[] {
   const next: DbConversationSummary[] = []
   for (const conv of conversations) {
     if (conv.pinned_at != null) continue
     if (!showCompleted && conv.status === "completed") continue
-    if (conv.kind !== "chat" && !openFolderIds.has(conv.folder_id)) continue
+    const isChat = conv.kind === "chat"
+    if (!isChat && !openFolderIds.has(conv.folder_id)) continue
+    // The user's "just chats" / "just folder sessions" narrowing. Same split
+    // the Chat and Folders sections use, so the two views always agree.
+    if (filter === "chats" && !isChat) continue
+    if (filter === "folders" && isChat) continue
+    if (filter === "cli" && conv.source !== "cli") continue
     next.push(conv)
   }
-  next.sort(
-    sortMode === "updated" ? compareByUpdatedAtDesc : compareByCreatedAtDesc
-  )
+  next.sort(compareByUpdatedAtDesc)
   return arraysShallowEqual(prev, next) ? prev : next
 }
 
@@ -1037,9 +1084,12 @@ export interface FoldersEmptyRow {
 
 /**
  * The single empty-state hint shown under an expanded but empty "Recent"
- * section ("No recent conversations"). Folderless like {@link ChatsEmptyRow},
- * and reached only in a workspace with literally nothing in it — Recent spans
- * every section, so any conversation at all fills it.
+ * section ("No recent conversations"). Folderless like {@link ChatsEmptyRow}.
+ * Under the default "all" filter it is reached only when nothing passes
+ * Recent's own gates (see {@link selectRecentConversationsWithReuse}) — Recent
+ * spans every section, so any other conversation fills it. A "chats" /
+ * "folders" filter can also narrow the section to nothing, and the renderer
+ * names that filter in the hint.
  */
 export interface RecentEmptyRow {
   kind: "recent-empty"
@@ -1072,9 +1122,9 @@ export interface RecentMoreRow {
  * when there are pinned conversations) plus the three user-reorderable ones —
  * "folders" (wraps the whole folder list), "chats" (a flat list of folderless
  * chat-mode conversations), and "recent" (a flat, folder-agnostic list of the
- * newest conversations, shown only when the user keeps it enabled). All live in
- * the same flat row array so the single Virtualizer windows them like any other
- * row — there is no separate, un-virtualized list.
+ * most recently active conversations, shown only when the user keeps it
+ * enabled). All live in the same flat row array so the single Virtualizer
+ * windows them like any other row — there is no separate, un-virtualized list.
  */
 export interface SectionHeaderRow {
   kind: "section"
@@ -1316,8 +1366,10 @@ export function buildRows(args: {
   chatConversations: readonly DbConversationSummary[]
   chatsExpanded: boolean
   /** The flat "Recent" bucket — every reachable conversation, folder-bound and
-   *  chat alike, newest first (see {@link selectRecentConversationsWithReuse}).
-   *  Only read when `showRecent`. Optional — defaults to empty. */
+   *  chat alike (or just one kind, under the user's filter), most recently
+   *  active first (see {@link selectRecentConversationsWithReuse}). Only read
+   *  when `showRecent`.
+   *  Optional — defaults to empty. */
   recentConversations?: readonly DbConversationSummary[]
   /** Whether the Recent section's rows are shown (its own collapse toggle).
    *  Optional — defaults to expanded. */
@@ -1386,6 +1438,15 @@ export function buildRows(args: {
   /** Collapsed state of each folder group, keyed by group id. Absent key =
    *  expanded (the default), mirroring `folderExpanded`. Optional. */
   groupExpanded?: Record<number, boolean>
+  /**
+   * The buckets were narrowed by a filter (the sidebar's tag filter), so an
+   * empty bucket means "nothing here matches", not "this folder is empty".
+   * Such folders — and worktree sub-groups, and groups left with no matching
+   * member — are dropped instead of drawing a header over an empty hint, and
+   * the Folders section counts only the folders still shown. Optional —
+   * omitted keeps every folder, as before.
+   */
+  hideEmptyFolders?: boolean
 }): SidebarRow[] {
   const {
     pinned,
@@ -1411,8 +1472,28 @@ export function buildRows(args: {
     pendingSubfolderParentId = null,
     layout,
     groupExpanded = EMPTY_GROUP_EXPANDED,
+    hideEmptyFolders = false,
   } = args
   const rows: SidebarRow[] = []
+
+  // Under `hideEmptyFolders`: does this display bucket hold any row, and does
+  // this folder entry — a container counts its worktrees too — hold any?
+  const bucketHasRows = (folderId: number) =>
+    (byFolder.get(folderId)?.length ?? 0) > 0
+  const entryHasRows = (
+    folderId: number,
+    seen = new Set<number>()
+  ): boolean => {
+    if (seen.has(folderId)) return false
+    seen.add(folderId)
+    return (
+      bucketHasRows(folderId) ||
+      (containerChildren.get(folderId) ?? []).some(bucketHasRows) ||
+      (subfolderChildren.get(folderId) ?? []).some((childId) =>
+        entryHasRows(childId, seen)
+      )
+    )
+  }
 
   if (pinned.length > 0) {
     rows.push({
@@ -1485,13 +1566,15 @@ export function buildRows(args: {
       for (const subId of subfolders) pushFolderEntry(subId, childDepth)
     }
 
+    if (hideEmptyFolders && !entryHasRows(folderId)) return
     const worktrees = containerChildren.get(folderId)
     if (!worktrees || worktrees.length === 0) {
       // Plain folder (or, under Show worktrees, a repo with no open worktrees):
       // header + its own bucket — the flat model, plus any nested subfolders.
       rows.push({ kind: "folder", folderId })
       if (folderExpanded[folderId] ?? true) {
-        pushFolderBody(folderId, baseDepth)
+        if (!hideEmptyFolders || bucketHasRows(folderId))
+          pushFolderBody(folderId, baseDepth)
         if (pendingSubfolderParentId === folderId)
           rows.push({ kind: "subfolder-create", parentId: folderId })
         pushSubfolders(baseDepth + 1)
@@ -1504,11 +1587,14 @@ export function buildRows(args: {
     rows.push({ kind: "folder", folderId })
     if (!(folderExpanded[folderId] ?? true)) return
     // The repo's OWN sessions move into an indented "root" sub-group, first.
-    rows.push({ kind: "root-group", folderId })
-    if (!rootGroupCollapsed.has(folderId))
-      pushFolderBody(folderId, baseDepth + 1)
+    if (!hideEmptyFolders || bucketHasRows(folderId)) {
+      rows.push({ kind: "root-group", folderId })
+      if (!rootGroupCollapsed.has(folderId))
+        pushFolderBody(folderId, baseDepth + 1)
+    }
     // Then each worktree as its own indented sub-group.
     for (const worktreeId of worktrees) {
+      if (hideEmptyFolders && !bucketHasRows(worktreeId)) continue
       rows.push({ kind: "folder", folderId: worktreeId })
       if (folderExpanded[worktreeId] ?? true) {
         pushFolderBody(worktreeId, baseDepth + 1)
@@ -1534,7 +1620,10 @@ export function buildRows(args: {
       kind: "section",
       section: "folders",
       expanded: foldersExpanded,
-      count: orderedFolderIds.length,
+      // Filtered: the folders still shown, so the badge agrees with the list.
+      count: hideEmptyFolders
+        ? orderedFolderIds.filter((id) => entryHasRows(id)).length
+        : orderedFolderIds.length,
     })
     if (!foldersExpanded) return
     // No layout given (or one with no groups at all) → the historical path,
@@ -1543,16 +1632,16 @@ export function buildRows(args: {
       layout && layout.top.length > 0
         ? layout
         : layoutFromOrderedIds(orderedFolderIds)
-    if (resolved.top.length === 0) {
-      rows.push({ kind: "folders-empty" })
-      return
-    }
+    const rowsBefore = rows.length
     for (const entry of resolved.top) {
       if (entry.kind === "folder") {
         pushFolderEntry(entry.id, 0)
         continue
       }
       const members = resolved.membersByGroup.get(entry.id) ?? []
+      // A group with nothing that matches goes too — but only under a filter:
+      // unfiltered, an empty group is a real state that renders its own hint.
+      if (hideEmptyFolders && !members.some((id) => entryHasRows(id))) continue
       const expanded = groupExpanded[entry.id] ?? true
       // No member count on the row: the heading's badge shows RUNNING sessions,
       // which the render layer derives from live conversation state rather than
@@ -1567,6 +1656,9 @@ export function buildRows(args: {
       }
       for (const memberId of members) pushFolderEntry(memberId, 1)
     }
+    // Nothing drawn under the header: no folders open at all, or — filtered —
+    // none with a match. The renderer words the hint for each.
+    if (rows.length === rowsBefore) rows.push({ kind: "folders-empty" })
   }
 
   const pushChats = () => {

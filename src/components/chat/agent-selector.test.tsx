@@ -11,7 +11,7 @@ vi.mock("@/hooks/use-acp-agents", () => ({
 import { AgentSelector } from "./agent-selector"
 import { useAcpAgents } from "@/hooks/use-acp-agents"
 import enMessages from "@/i18n/messages/en.json"
-import { getAgentLabel } from "@/lib/custom-agents"
+import { getAgentLabel, setCustomAgentDisplay } from "@/lib/custom-agents"
 import type { AcpAgentInfo, AgentType } from "@/lib/types"
 
 const mockUseAcpAgents = vi.mocked(useAcpAgents)
@@ -39,7 +39,6 @@ function agent(
     env: {},
     config_json: null,
     config_file_path: null,
-    opencode_auth_json: null,
     codex_auth_json: null,
     codex_config_toml: null,
     codex_model_catalog: null,
@@ -338,5 +337,37 @@ describe("AgentSelector", () => {
     const calls = onAgentsLoaded.mock.calls
     const lastCall = calls[calls.length - 1]?.[0]
     expect(lastCall).toEqual([codex])
+  })
+
+  it("keeps custom accounts reachable by name in the agent dropdown", async () => {
+    const custom = [2, 3, 4, 5].map((slot) =>
+      agent(`custom:claude-code-${slot}`, { name: `Review seat ${slot}` })
+    )
+    setCustomAgentDisplay(
+      custom.map((a) => ({ agentType: a.agent_type, name: a.name }))
+    )
+    mockUseAcpAgents.mockReturnValue({
+      agents: [...MANY_AGENTS.map((type) => agent(type)), ...custom],
+      fresh: true,
+      refresh: async () => {},
+    })
+    const onSelect = vi.fn()
+    renderWithIntl(
+      <AgentSelector defaultAgentType="claude_code" onSelect={onSelect} />
+    )
+    await userEvent.click(screen.getByRole("button", { name: "Claude Code" }))
+    expect(await screen.findAllByRole("menuitem")).toHaveLength(
+      MANY_AGENTS.length + custom.length
+    )
+    for (const account of custom) {
+      expect(
+        screen.getByRole("menuitem", { name: new RegExp(account.name) })
+      ).toBeVisible()
+    }
+    await userEvent.click(
+      screen.getByRole("menuitem", { name: /Review seat 5/ })
+    )
+    expect(onSelect).toHaveBeenCalledWith("custom:claude-code-5")
+    setCustomAgentDisplay([])
   })
 })

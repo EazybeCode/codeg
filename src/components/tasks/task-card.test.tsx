@@ -68,6 +68,8 @@ function renderCard(
     onUnqueueMerge: noop,
     onComplete: noop,
     onArchive: noop,
+    onDefer: noop,
+    onFollowUp: noop,
     onEdit: noop,
     onSchedule: noop,
     ...handlers,
@@ -307,5 +309,92 @@ describe("TaskCard forge provenance", () => {
     const metaLine = screen.getByText("task/7").parentElement
     expect(metaLine).not.toBeNull()
     expect(metaLine?.contains(link)).toBe(false)
+  })
+})
+
+describe("TaskCard live note", () => {
+  it("explains a card that is parked on its context compaction", () => {
+    // Card and row share `liveNote`, so this is the card's half of the same
+    // contract: a resumed round spends `preparing` (retry, follow-up) or
+    // `merging` (a landing) on a real agent turn, and until it ends the card
+    // has nothing else to say for itself.
+    renderCard(task({ status: "preparing", compacting: true }))
+    expect(screen.getByText("Compacting the session context…")).toBeTruthy()
+  })
+
+  it("shows this generation's milestone once the compaction is over", () => {
+    renderCard(
+      task({
+        status: "running",
+        compacting: false,
+        latest_progress: "installing deps",
+      })
+    )
+    expect(screen.getByText("installing deps")).toBeTruthy()
+  })
+})
+
+describe("TaskCard handle later", () => {
+  it("offers it beside a reviewed task's acceptance", async () => {
+    const onDefer = vi.fn()
+    const onMerge = vi.fn()
+    renderCard(task({ files_changed: 3 }), { onDefer, onMerge })
+    await userEvent.click(screen.getByRole("button", { name: "Handle later" }))
+    expect(onDefer).toHaveBeenCalledTimes(1)
+    expect(onMerge).not.toHaveBeenCalled()
+  })
+
+  it("says a deferred task is deferred and leads with the follow-up", async () => {
+    const onFollowUp = vi.fn()
+    const onDefer = vi.fn()
+    const onOpen = vi.fn()
+    renderCard(
+      task({ files_changed: 3, deferred_at: "2026-08-01T02:00:00Z" }),
+      { onFollowUp, onDefer, onOpen }
+    )
+    // The chip names the deferral; the review underneath rides its tooltip.
+    expect(screen.getByTitle("Deferred · To review")).toHaveTextContent(
+      "Deferred"
+    )
+    expect(screen.queryByRole("button", { name: "Merge" })).toBeNull()
+    await userEvent.click(screen.getByRole("button", { name: "Follow up" }))
+    expect(onFollowUp).toHaveBeenCalledTimes(1)
+    await userEvent.click(
+      screen.getByRole("button", { name: "Back to Needs you" })
+    )
+    expect(onDefer).toHaveBeenCalledTimes(1)
+    // Neither action opens the detail sheet underneath.
+    expect(onOpen).not.toHaveBeenCalled()
+  })
+
+  it("keeps a deferred failure's retry, error and all", async () => {
+    const onRetry = vi.fn()
+    renderCard(
+      task({
+        status: "failed",
+        last_error: "boom: exit 1",
+        deferred_at: "2026-08-01T02:00:00Z",
+      }),
+      { onRetry }
+    )
+    expect(screen.getByTitle("Deferred · Failed")).toBeInTheDocument()
+    expect(screen.getByText("boom: exit 1")).toBeInTheDocument()
+    await userEvent.click(screen.getByRole("button", { name: "Retry" }))
+    expect(onRetry).toHaveBeenCalledTimes(1)
+    expect(
+      screen.getByRole("button", { name: "Back to Needs you" })
+    ).toBeInTheDocument()
+  })
+
+  it("lets the primary label give way instead of the secondaries", () => {
+    // A failed card carries four round secondaries; the primary is the one
+    // control allowed to shrink, truncating its label (whole on hover).
+    renderCard(task({ status: "failed", conversation_id: 3 }))
+    const retry = screen.getByRole("button", { name: "Retry" })
+    expect(retry).toHaveClass("min-w-0", "shrink")
+    expect(retry).toHaveAttribute("title", "Retry")
+    for (const name of ["Edit", "Handle later", "Archive", "View session"]) {
+      expect(screen.getByRole("button", { name })).toBeInTheDocument()
+    }
   })
 })

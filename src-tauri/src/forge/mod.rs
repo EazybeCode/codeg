@@ -1,12 +1,14 @@
-//! Forge (GitHub/GitLab) integration core: account/auth resolution, a
+//! Forge (GitHub/GitLab/Gitea) integration core: account/auth resolution, a
 //! proxy-aware HTTP client, the canonical source-key normalizer and the REST
 //! reads the Issues/PR workbench needs. Deliberately thin — no query DSL, no
 //! response caching (see `.docs/architecture/2026-08-17-*` for what is out of
 //! scope and why REST-direct beat shelling out to `gh`/`glab`).
 
 pub mod auth;
+pub mod auto;
 pub mod deliver;
 pub mod envelope;
+pub mod gitea;
 pub mod github;
 pub mod gitlab;
 pub mod settings;
@@ -26,6 +28,11 @@ pub use auth::{host_profile, resolve_forge_auth, strip_base_path, HostProfile, R
 pub enum ForgeProvider {
     GitHub,
     GitLab,
+    /// Gitea — and, by construction, Forgejo: it is a Gitea fork that keeps the
+    /// same `/api/v1` surface, so an instance of either answers every request
+    /// this variant makes. Nothing downstream distinguishes them, and inventing
+    /// a fourth variant would only split one credential store in two.
+    Gitea,
 }
 
 impl ForgeProvider {
@@ -33,6 +40,7 @@ impl ForgeProvider {
         match self {
             ForgeProvider::GitHub => "github",
             ForgeProvider::GitLab => "gitlab",
+            ForgeProvider::Gitea => "gitea",
         }
     }
 
@@ -43,6 +51,7 @@ impl ForgeProvider {
         match value.trim().to_ascii_lowercase().as_str() {
             "github" => Ok(ForgeProvider::GitHub),
             "gitlab" => Ok(ForgeProvider::GitLab),
+            "gitea" => Ok(ForgeProvider::Gitea),
             other => Err(ForgeError::Invalid(format!("unknown provider: {other}"))),
         }
     }
@@ -54,15 +63,18 @@ impl ForgeProvider {
         match self {
             ForgeProvider::GitHub => "GitHub",
             ForgeProvider::GitLab => "GitLab",
+            ForgeProvider::Gitea => "Gitea",
         }
     }
 
     /// What this forge calls a proposed change, for messages the user reads.
     /// GitLab users do not have "pull requests" and being told they do reads
-    /// like the wrong tool answered.
+    /// like the wrong tool answered. Gitea sides with GitHub here — its own UI
+    /// says "pull request" — which is one of the several places it is easier to
+    /// treat as a GitHub dialect than as its own vocabulary.
     pub fn change_noun(self) -> &'static str {
         match self {
-            ForgeProvider::GitHub => "pull request",
+            ForgeProvider::GitHub | ForgeProvider::Gitea => "pull request",
             ForgeProvider::GitLab => "merge request",
         }
     }
@@ -75,9 +87,13 @@ impl ForgeProvider {
     /// underscore, but the git ref namespace is `refs/merge-requests/<iid>`.
     /// The two spellings sit three lines apart in this file for a reason —
     /// using the API's spelling as a ref fetches nothing at all.
+    ///
+    /// Gitea publishes under GitHub's namespace exactly (`refs/pull/<index>/head`,
+    /// its `git.RefNameFromPullIndex`), which is what lets a pull-request task
+    /// check out a Gitea fork's head without adding a remote.
     pub fn change_head_ref(self, number: i64) -> String {
         match self {
-            ForgeProvider::GitHub => format!("refs/pull/{number}/head"),
+            ForgeProvider::GitHub | ForgeProvider::Gitea => format!("refs/pull/{number}/head"),
             ForgeProvider::GitLab => format!("refs/merge-requests/{number}/head"),
         }
     }
@@ -112,6 +128,17 @@ impl ForgeProvider {
                     ForgeItemKind::Change => "merge_requests",
                 };
                 format!("{origin}/{owner_repo}/-/{segment}/{number}")
+            }
+            ForgeProvider::Gitea => {
+                // `pulls`, PLURAL — the one letter that separates Gitea's web
+                // route from GitHub's `/pull/{n}`. Gitea 404s on the singular
+                // form, so borrowing GitHub's spelling here would put a dead
+                // link on every proposed change.
+                let segment = match kind {
+                    ForgeItemKind::Issue => "issues",
+                    ForgeItemKind::Change => "pulls",
+                };
+                format!("{origin}/{owner_repo}/{segment}/{number}")
             }
         }
     }
@@ -180,12 +207,12 @@ pub enum ForgeError {
     #[error("no {} account for host {host}", provider.display_name())]
     NoAccount { provider: ForgeProvider, host: String },
     /// The host is not one codeg can read: nothing is configured for it and its
-    /// name claims neither forge. Distinct from [`ForgeError::NoAccount`]
+    /// name claims none of the forges. Distinct from [`ForgeError::NoAccount`]
     /// because the advice differs — "add a GitHub account for bitbucket.org"
-    /// is advice that cannot work, while "only GitHub and GitLab are
+    /// is advice that cannot work, while "only GitHub, GitLab and Gitea are
     /// supported" is the actual answer (with adding an account still the way
     /// in for a self-hosted instance under an unrelated name).
-    #[error("unsupported forge host {host}: only GitHub and GitLab are supported")]
+    #[error("unsupported forge host {host}: only GitHub, GitLab and Gitea are supported")]
     UnsupportedHost { host: String },
     /// The host answered in a way only the OTHER forge answers — codeg had it
     /// classified wrong and now knows better. Recoverable by construction: the
@@ -271,10 +298,10 @@ pub fn source_key(
     kind: &str,
     number: i64,
 ) -> Result<String, ForgeError> {
-    let provider = provider.trim().to_ascii_lowercase();
-    if provider != "github" && provider != "gitlab" {
-        return Err(ForgeError::Invalid(format!("unknown provider: {provider}")));
-    }
+    // Through the enum rather than an inline list of names: this is the third
+    // place a provider name is validated, and a hand-written list here is what
+    // would silently refuse every key of a forge added to the enum later.
+    let provider = ForgeProvider::parse(provider)?.as_str();
     let kind = kind.trim().to_ascii_lowercase();
     if kind != "issue" && kind != "pr" {
         return Err(ForgeError::Invalid(format!("unknown source kind: {kind}")));
@@ -394,6 +421,20 @@ pub struct ForgeSourceMeta {
     pub head_repo: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_pr: Option<String>,
+    /// Number of `result_pr`, written with it. What lets a task that stayed in
+    /// review after delivering push its next round INTO that pull request
+    /// rather than looking one up by branch again. Absent on rows delivered
+    /// before it was recorded — every one of them `done`, so nothing reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_pr_number: Option<i64>,
+    /// For a pull-request task, the pull request's head that the task's last
+    /// push-back went onto: read from the forge right before that push, and
+    /// under the task's branch since the push was a fast-forward. The latest
+    /// point known to be where the pull request ends below the task's own
+    /// work, which the own-work counters then measure from (see
+    /// `work_task::engine::pull_head_in_branch`). Absent until a push-back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pushed_onto: Option<String>,
     /// Whether this task comments its outcome back on the item when it
     /// finishes — the answer the user gave in the trigger dialog, frozen here.
     /// It lives on the task rather than in folder settings because it is a
@@ -405,6 +446,166 @@ pub struct ForgeSourceMeta {
     /// which is the posture the old folder setting shipped with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub writeback: Option<bool>,
+}
+
+/// Where a task WITHOUT forge provenance delivers its work: the repository its
+/// project folder's `origin` names, on a forge codeg speaks, and the account
+/// that speaks for that host.
+///
+/// Resolved from the checkout at the task's first delivery and pinned from
+/// then on (in [`WorkTaskDelivery`]) — the same rule a forge-sourced task
+/// follows with the account that triggered it: a later default-account flip,
+/// or an `origin` pointed somewhere else, must not quietly change who pushes,
+/// or into which repository the task's pull request is updated.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DeliveryTarget {
+    pub provider: ForgeProvider,
+    pub server_host: String,
+    pub account_id: String,
+    pub owner_repo: String,
+}
+
+/// Stored in `work_task.delivery` (JSON) for a task without forge provenance,
+/// mirrored to the frontend as `WorkTaskDelivery` in `src/lib/types.ts`: where
+/// it delivered, and the pull request the latest delivery settled against.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WorkTaskDelivery {
+    #[serde(flatten)]
+    pub target: DeliveryTarget,
+    pub pr_url: String,
+    pub pr_number: i64,
+}
+
+/// Pages one auto-processing scan reads per collection before it hands the
+/// rest of the window to the next scan ([`OpenItemsScan::resume`]). A budget
+/// per scan, not a cap on what is ever read: ten thousand items a scan, so a
+/// backlog that size is worked through over several scans instead of spending
+/// the hour's API quota in one go and failing every time.
+pub const SCAN_MAX_PAGES: u32 = 100;
+
+/// Rows per scan page. The maximum both GitHub and GitLab serve; Gitea clamps
+/// it to its own `MAX_RESPONSE_ITEMS` (50 by default) and its client asks for
+/// that instead.
+pub const SCAN_PAGE_SIZE: u32 = 100;
+
+/// Pages a scan carrying on with a cut-short window reads AGAIN before the
+/// page its cursor names — see [`ScanCursor`] for what they absorb.
+pub const SCAN_CONTINUATION_OVERLAP_PAGES: u32 = 1;
+
+/// Where one collection of a scan's listing stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CollectionCursor {
+    /// Read on from this page next time.
+    Next(u32),
+    /// Read to its last page — the rest of the window has nothing more here.
+    Done,
+}
+
+/// Where a listing cut short by the page budget carries on: per collection
+/// it reads (GitHub's one mixed feed; GitLab's and Gitea's one per kind), the
+/// next page — or that it was read to the end.
+///
+/// A PAGE number rather than a timestamp, and within the SAME window: the
+/// lists are newest-updated (Gitea: newest-created) first, so an item updated
+/// while the window is being worked through moves to the front, which shifts
+/// what follows DOWN a place — read again, never skipped. A timestamp
+/// resumption would need the opposite order, where every such update shifts
+/// the unread rows UP into pages already read and loses one at each boundary.
+///
+/// An item LEAVING the list (closed or deleted) does shift the rest up, and
+/// between two scans of a sweep — minutes apart — that is no longer rare: one
+/// read item closed moves the first unread one back onto the last page read.
+/// So a scan carrying on starts [`SCAN_CONTINUATION_OVERLAP_PAGES`] early and
+/// reads that page again; up to a page's worth of such closures lands inside
+/// the overlap, and the pick-up check absorbs the rows read twice. Within one
+/// scan the same shift needs a closure in the seconds between two page reads
+/// to matter, and is accepted.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ScanCursor {
+    collections: std::collections::BTreeMap<&'static str, CollectionCursor>,
+}
+
+impl ScanCursor {
+    /// The page to read `collection` from, or `None` when it was already read
+    /// to its end in this window. A collection the cursor has never seen
+    /// starts at page 1.
+    pub fn first_page(&self, collection: &'static str) -> Option<u32> {
+        match self.collections.get(collection) {
+            None => Some(1),
+            Some(CollectionCursor::Next(page)) => Some(*page),
+            Some(CollectionCursor::Done) => None,
+        }
+    }
+
+    pub fn record(&mut self, collection: &'static str, at: CollectionCursor) {
+        self.collections.insert(collection, at);
+    }
+
+    /// Whether some collection still has pages to read.
+    pub fn has_more(&self) -> bool {
+        self.collections
+            .values()
+            .any(|at| matches!(at, CollectionCursor::Next(_)))
+    }
+}
+
+/// What one auto-processing scan read from a repository: OPEN items of the
+/// wanted kinds updated at or after the scan's window start — all of them, or
+/// as many as the page budget allowed.
+#[derive(Debug, Clone, Default)]
+pub struct OpenItemsScan {
+    pub rows: Vec<ForgeIssueRow>,
+    /// `None` when every collection was read to its end; otherwise where the
+    /// next scan of the SAME window carries on.
+    pub resume: Option<ScanCursor>,
+}
+
+/// Read one collection of a scan listing from where `from` says, under the
+/// page budget, and record where it stands in `to`. `fetch_page` returns a
+/// page's rows and whether the server offers a page after it. Shared by the
+/// three forges so the budget and the cursor arithmetic exist once.
+pub(crate) async fn scan_collection<F, Fut>(
+    collection: &'static str,
+    from: &ScanCursor,
+    to: &mut ScanCursor,
+    rows: &mut Vec<ForgeIssueRow>,
+    budget: u32,
+    mut fetch_page: F,
+) -> Result<(), ForgeError>
+where
+    F: FnMut(u32) -> Fut,
+    Fut: std::future::Future<Output = Result<(Vec<ForgeIssueRow>, bool), ForgeError>>,
+{
+    let Some(cursor_page) = from.first_page(collection) else {
+        to.record(collection, CollectionCursor::Done);
+        return Ok(());
+    };
+    // Carrying on: back up into the overlap (never before page 1). Progress
+    // is still `budget - overlap` pages a scan.
+    let first = cursor_page
+        .saturating_sub(SCAN_CONTINUATION_OVERLAP_PAGES)
+        .max(1);
+    for page in first..first.saturating_add(budget) {
+        let (mut got, has_next) = fetch_page(page).await?;
+        rows.append(&mut got);
+        if !has_next {
+            to.record(collection, CollectionCursor::Done);
+            return Ok(());
+        }
+    }
+    to.record(
+        collection,
+        CollectionCursor::Next(first.saturating_add(budget)),
+    );
+    Ok(())
+}
+
+/// A scan watermark as every forge's "updated since" parameter accepts it:
+/// RFC 3339, whole seconds, `Z`. Rounded DOWN by the truncation, which errs
+/// toward reading an item twice — the dedup absorbs that — never toward
+/// missing one.
+pub fn scan_timestamp(since: chrono::DateTime<chrono::Utc>) -> String {
+    since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
 /// List rows carry the body for the trigger snapshot; cap it so a megabyte
@@ -1592,15 +1793,19 @@ pub(crate) fn validate_state_filter(state: &str) -> Result<(), ForgeError> {
 ///
 /// `https://api.github.com` is the public service's dedicated API host, whose
 /// web origin is `https://github.com`; GitHub Enterprise mounts its API under
-/// the instance (`{origin}/api/v3`) and GitLab under `{origin}/api/v4`. One
-/// derivation, used by every place that needs a link or a push URL — three
-/// copies of this rule would be three chances to disagree.
+/// the instance (`{origin}/api/v3`), GitLab under `{origin}/api/v4` and Gitea
+/// under `{origin}/api/v1`. One derivation, used by every place that needs a
+/// link or a push URL — three copies of this rule would be three chances to
+/// disagree.
 pub fn web_origin(auth: &ResolvedAuth) -> String {
     let base = auth.api_base.trim_end_matches('/');
     if base == "https://api.github.com" {
         return "https://github.com".to_string();
     }
-    match base.strip_suffix("/api/v3").or_else(|| base.strip_suffix("/api/v4")) {
+    match ["/api/v3", "/api/v4", "/api/v1"]
+        .iter()
+        .find_map(|suffix| base.strip_suffix(suffix))
+    {
         Some(origin) => origin.to_string(),
         None => format!("https://{}", auth.server_host),
     }
@@ -1646,8 +1851,16 @@ fn origin_of(url: &reqwest::Url) -> (String, Option<String>, Option<u16>) {
     )
 }
 
+/// Every env var a reqwest client samples its proxy decision from at build
+/// time: the proxy URLs and the bypass list. A change to either must rebuild.
+fn proxy_fingerprint() -> Vec<(String, String)> {
+    let mut fingerprint = crate::network::proxy::current_proxy_env_vars();
+    fingerprint.extend(crate::network::proxy::current_no_proxy_env_vars());
+    fingerprint
+}
+
 pub(crate) fn http_client() -> Result<reqwest::Client, ForgeError> {
-    let fingerprint = crate::network::proxy::current_proxy_env_vars();
+    let fingerprint = proxy_fingerprint();
     if let Ok(guard) = HTTP_CLIENT.read() {
         if let Some((cached, client)) = guard.as_ref() {
             if *cached == fingerprint {
@@ -1778,12 +1991,21 @@ mod tests {
     fn provider_parsing_refuses_what_it_does_not_know() {
         assert_eq!(ForgeProvider::parse("GitHub").unwrap(), ForgeProvider::GitHub);
         assert_eq!(ForgeProvider::parse(" gitlab ").unwrap(), ForgeProvider::GitLab);
+        assert_eq!(ForgeProvider::parse("Gitea").unwrap(), ForgeProvider::Gitea);
         assert!(ForgeProvider::parse("bitbucket").is_err());
         assert!(ForgeProvider::parse("").is_err());
+        // Forgejo is served by the Gitea client, but it is not a NAME this
+        // accepts: what gets stored on an account and in a source key is the
+        // one wire value, or provenance splits in two for one instance.
+        assert!(ForgeProvider::parse("forgejo").is_err());
         // The wire form round-trips through the stored source_meta JSON.
         assert_eq!(
             serde_json::to_string(&ForgeProvider::GitLab).unwrap(),
             "\"gitlab\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ForgeProvider::Gitea).unwrap(),
+            "\"gitea\""
         );
     }
 
@@ -1824,6 +2046,22 @@ mod tests {
         // Both forges' changes key as "pr" so provenance keys stay comparable.
         assert_eq!(ForgeItemKind::Change.key_segment(), "pr");
         assert_eq!(ForgeItemKind::Issue.key_segment(), "issue");
+
+        // Gitea is GitHub's dialect everywhere except the one letter in its
+        // web route: `/pulls/7`, PLURAL, where GitHub says `/pull/7`. Its git
+        // ref namespace IS GitHub's, which is what lets a task check out a
+        // Gitea change without adding a remote.
+        let gt = ForgeProvider::Gitea;
+        assert_eq!(
+            gt.item_url("https://gitea.corp.com", "acme/app", ForgeItemKind::Change, 7),
+            "https://gitea.corp.com/acme/app/pulls/7"
+        );
+        assert_eq!(
+            gt.item_url("https://gitea.corp.com", "acme/app", ForgeItemKind::Issue, 7),
+            "https://gitea.corp.com/acme/app/issues/7"
+        );
+        assert_eq!(gt.change_head_ref(7), "refs/pull/7/head");
+        assert_eq!(gt.change_noun(), "pull request");
     }
 
     /// The push URL and every stored link come from this one derivation: a
@@ -1848,6 +2086,8 @@ mod tests {
         assert_eq!(web_origin(&auth), "https://ghe.corp.com:8443");
         auth.api_base = "http://gitlab.corp.com:8929/api/v4".into();
         assert_eq!(web_origin(&auth), "http://gitlab.corp.com:8929");
+        auth.api_base = "https://gitea.corp.com/api/v1".into();
+        assert_eq!(web_origin(&auth), "https://gitea.corp.com");
         // A base that is neither shape: fall back to the host we know rather
         // than build a link into whatever that string was.
         auth.api_base = "https://gitlab.com/weird".into();
@@ -2402,6 +2642,6 @@ mod tests {
             .as_ref()
             .map(|(fp, _)| fp.clone())
             .expect("cached");
-        assert_eq!(cached_fp, crate::network::proxy::current_proxy_env_vars());
+        assert_eq!(cached_fp, proxy_fingerprint());
     }
 }
