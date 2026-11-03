@@ -253,6 +253,7 @@ async fn workspace_execution_delegation_constructor_cannot_reuse_managed_folder(
         parent_conversation_id: parent_id,
         parent_tool_use_id: "tool-fixture".into(),
         delegation_call_id: "call-fixture".into(),
+        assistant: None,
     })] {
         results.push(crate::db::service::conversation_service::create_with_delegation(
             &db.conn, folder_id, AgentType::ClaudeCode, None, None, delegation,
