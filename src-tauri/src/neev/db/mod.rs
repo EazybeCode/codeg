@@ -352,7 +352,9 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
 
         // DOCX support widens the existing attachment content-type CHECK. It
         // has no table inventory change, so apply it before validating any
-        // schema that already contains the attachment tables.
+        // schema that already contains the attachment tables. That includes
+        // the current schema: a database that reached 25 on a release before
+        // DOCX support has the narrow CHECK and no later arm would widen it.
         if names == v15_expected
             || names == v16_expected
             || names == v17_expected
@@ -362,6 +364,7 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
             || names == v22_expected
             || names == v23_expected
             || names == v24_expected
+            || names == v25_expected
         {
             attachment_migration::allow_docx_content_type(&tx).await?;
         }
