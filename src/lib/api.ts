@@ -48,6 +48,8 @@ import type {
   ForgeIdentity,
   ForgeIssueList,
   ForgeIssueRow,
+  ForgeIssuesCreateResult,
+  ForgeIssuesTaskDraftInput,
   ForgeLabelList,
   ForgeMergeMethod,
   ForgeMergeOptions,
@@ -687,6 +689,10 @@ export async function acpUpdateAgentConfig(
   agentType: AgentType,
   params: {
     config_json?: string | null
+    system_instructions_content?: string | null
+    /** The instructions file the editor showed: the content is written there
+     *  (the agent's own file only), not to a fresh resolution. */
+    system_instructions_file_path?: string | null
     codex_auth_json?: string | null
     codex_config_toml?: string | null
     /** The config.toml text the draft was loaded from: a key codeg manages
@@ -715,6 +721,8 @@ export async function acpUpdateAgentConfig(
   return getTransport().call("acp_update_agent_config", {
     agentType,
     configJson: params.config_json ?? null,
+    systemInstructionsContent: params.system_instructions_content ?? null,
+    systemInstructionsFilePath: params.system_instructions_file_path ?? null,
     codexAuthJson: params.codex_auth_json ?? null,
     codexConfigToml: params.codex_config_toml ?? null,
     codexConfigTomlBaseline: params.codex_config_toml_baseline ?? null,
@@ -1597,6 +1605,22 @@ export async function acpListAgentSkills(params: {
   })
 }
 
+/**
+ * The skills an agent's sessions can load, for the composer menus. For
+ * OpenCode that is every skill it reads (`.claude` folders and the folders
+ * above the workspace included), more than the Skills settings page manages
+ * through {@link acpListAgentSkills}; for every other agent the two agree.
+ */
+export async function acpListAgentRuntimeSkills(params: {
+  agentType: AgentType
+  workspacePath?: string | null
+}): Promise<AgentSkillsListResult> {
+  return getTransport().call("acp_list_agent_runtime_skills", {
+    agentType: params.agentType,
+    workspacePath: params.workspacePath ?? null,
+  })
+}
+
 export async function acpReadAgentSkill(params: {
   agentType: AgentType
   scope: AgentSkillScope
@@ -2204,6 +2228,14 @@ export async function validateGiteaToken(
   token: string
 ): Promise<GitHubTokenValidation> {
   return getTransport().call("validate_gitea_token", { serverUrl, token })
+}
+
+/** CNB is its own API dialect: `https://api.cnb.cool` with a `Bearer` token. */
+export async function validateCnbToken(
+  serverUrl: string,
+  token: string
+): Promise<GitHubTokenValidation> {
+  return getTransport().call("validate_cnb_token", { serverUrl, token })
 }
 
 export async function updateGitHubAccounts(
@@ -4314,7 +4346,11 @@ export async function workTaskDeliverPr(
   prTitle: string | null,
   draft: boolean,
   deleteWorktree: boolean,
-  markDone: boolean
+  markDone: boolean,
+  /** Which issues the pull request closes — a task made from several related
+   *  issues only, and only before its first delivery fixed the list. Omitted
+   *  (`undefined`) for every other delivery. */
+  closes?: number[]
 ): Promise<string> {
   return getTransport().call("work_task_deliver_pr", {
     id,
@@ -4322,6 +4358,7 @@ export async function workTaskDeliverPr(
     draft,
     deleteWorktree,
     markDone,
+    ...(closes === undefined ? {} : { closes }),
   })
 }
 
@@ -5547,6 +5584,16 @@ export async function setChatEventWebhooks(
   return getTransport().call("set_chat_event_webhooks", { webhooks })
 }
 
+export async function getChatEventTopLevelOnly(): Promise<boolean> {
+  return getTransport().call("get_chat_event_top_level_only")
+}
+
+export async function setChatEventTopLevelOnly(
+  enabled: boolean
+): Promise<void> {
+  return getTransport().call("set_chat_event_top_level_only", { enabled })
+}
+
 export async function getChatMessageLanguage(): Promise<string> {
   return getTransport().call("get_chat_message_language")
 }
@@ -6327,6 +6374,24 @@ export async function forgeListIssues(
   })
 }
 
+/** One issue, read in full — its description included.
+ *
+ *  CNB's issue LIST omits the body (its pull list carries one), so the detail
+ *  panel asks for the item itself the moment it opens — one request, paid only
+ *  for the item somebody is reading, the same trade the comment thread makes.
+ *  No other forge takes this path: their list rows already carry the body. */
+export async function forgeIssueDetail(
+  folderId: number,
+  number: number,
+  accountId?: string | null
+): Promise<ForgeIssueRow> {
+  return getTransport().call("forge_issue_detail", {
+    folderId,
+    number,
+    accountId: accountId ?? null,
+  })
+}
+
 /** Everything a COUNT may be narrowed by. No page and no order: neither can
  *  change the number, which is what lets the switcher survive a page turn
  *  without spending a request. */
@@ -6611,6 +6676,13 @@ export async function workTaskCreateFromForge(
   draft: ForgeTaskDraftInput
 ): Promise<ForgeCreateResult> {
   return getTransport().call("work_task_create_from_forge", { draft })
+}
+
+/** One task for several related issues — see `ForgeIssuesTaskDraftInput`. */
+export async function workTaskCreateFromForgeIssues(
+  draft: ForgeIssuesTaskDraftInput
+): Promise<ForgeIssuesCreateResult> {
+  return getTransport().call("work_task_create_from_forge_issues", { draft })
 }
 
 /** Latest task per source key (any state) — drives the row chips. */

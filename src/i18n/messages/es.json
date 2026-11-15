@@ -373,6 +373,10 @@
     "giteaDescription": "Gestiona las cuentas de Gitea (y Forgejo) para autenticación. Los tokens se almacenan localmente.",
     "giteaTokenHint": "Crea un token de acceso con los ámbitos write:repository, write:issue y read:user en Gitea → Settings → Applications.",
     "giteaNoAccounts": "Aún no hay ninguna cuenta de Gitea",
+    "cnbTitle": "Cuentas de CNB",
+    "cnbDescription": "Gestiona cuentas de CNB (cnb.cool) para la autenticación. Los tokens se guardan localmente.",
+    "cnbTokenHint": "Crea un token de acceso en CNB → Configuración personal → Tokens de acceso con los permisos account-profile:r, repo-issue:rw, repo-pr:rw, repo-notes:rw y repo-code:rw. Sin account-profile:r, CNB no indica a qué usuario pertenece el token y la cuenta no se puede añadir.",
+    "cnbNoAccounts": "Aún no hay ninguna cuenta de CNB",
     "noAccounts": "No hay cuentas de GitHub configuradas.",
     "addAccount": "Añadir cuenta",
     "serverUrl": "URL del servidor",
@@ -754,6 +758,16 @@
     "emptyNoAgent": "No hay agentes disponibles.",
     "configManagement": "Gestión de configuración",
     "envVars": "Variables de entorno",
+    "systemInstructions": {
+      "label": "Instrucciones del sistema",
+      "hint": "Configura las instrucciones globales del sistema para este agente y guárdalas en su archivo global de instrucciones.",
+      "placeholder": "Introduce instrucciones globales del sistema en formato Markdown, como definiciones de roles, directrices y normas de programación...",
+      "filePath": "Ruta del archivo",
+      "unsaved": "Cambios sin guardar",
+      "discard": "Descartar cambios",
+      "copyPath": "Copiar ruta del archivo",
+      "pathCopied": "Ruta del archivo copiada"
+    },
     "hostTools": {
       "label": "Dejar que el agente gestione archivos y comandos",
       "description": "codeg deja de atender el acceso a archivos y los comandos de terminal, de modo que el agente los ejecuta en su propio proceso, donde sí se aplican su sandbox y sus reglas de permisos. También se desactiva la delegación a otros agentes, ya que devolvería ese mismo trabajo a codeg. codeg no añade ningún sandbox propio, así que actívalo solo si el agente tiene uno configurado."
@@ -881,6 +895,7 @@
       }
     },
     "actions": {
+      "saveSystemInstructions": "Guardar instrucciones del sistema",
       "dragSort": "Arrastrar para reordenar",
       "dragSortAgent": "Arrastrar para reordenar {name}",
       "refreshCheck": "Actualizar comprobación",
@@ -1380,7 +1395,7 @@
         "hints": {
           "subagentDepth": "Cuántos niveles pueden anidarse los subagentes (experimental.subagent_depth). 1 impide que un subagente lance otro.",
           "preserveRecentTokens": "Presupuesto de tokens de los turnos recientes que se conservan literalmente tras una compactación (compaction.keep.tokens). Predeterminado: 15000.",
-          "reserved": "Ventana que se deja libre para que una compactación nunca desborde el contexto (compaction.buffer). Sin valor reserva el 15 % de la ventana, al menos 16K.",
+          "reserved": "Espacio que se deja libre en la ventana de contexto antes de la compactación automática (compaction.buffer): un número de tokens como <code>20000</code> o una parte de la ventana de <code>1%</code> a <code>99%</code>, como <code>20%</code>. Sin valor se deja libre el <code>15%</code> de la ventana, al menos <code>16000</code> tokens.",
           "maxLines": "La salida más larga se escribe en disco y se sustituye por una vista previa. Por defecto 2000.",
           "maxBytes": "La salida más grande se escribe en disco y se sustituye por una vista previa. Por defecto 51200."
         }
@@ -1574,6 +1589,8 @@
       "openCodeAuthRecovered": "OpenCode auth.json es inválido; se restableció a configuración predeterminada"
     },
     "toasts": {
+      "systemInstructionsSaved": "Instrucciones del sistema guardadas",
+      "saveSystemInstructionsFailed": "No se pudieron guardar las instrucciones del sistema",
       "agentActionCompleted": "{name} {action} completado",
       "agentActionFailed": "{name} {action} falló",
       "localVersion": "Versión local: {version}",
@@ -3284,6 +3301,7 @@
           "sessionLoadResourceNotFound": "Error al cargar la sesión de {agent}. Recarga para reintentar o inicia una nueva conversación.",
           "sessionLoadUnavailable": "{agent} no pudo restaurar esta sesión; es posible que haya finalizado o que el agente se haya detenido. Recarga para reintentar o inicia una nueva conversación.",
           "sessionLoadBusy": "Esta sesión está abierta en otro lugar. Si la tiene abierta otro cliente de {agent} (la app, la CLI o una extensión del IDE), ciérrala allí o sal de ese cliente y vuelve a cargar. Si acabas de bifurcarla, vuelve a cargar en un minuto.",
+          "sessionLoadProviderMismatch": "Esta conversación se inició con un proveedor de modelos distinto del que usa ahora {agent}, y {agent} solo continúa una conversación con su propio proveedor. Vuelve a ese proveedor en la configuración de {agent} y recarga, o inicia una conversación nueva. ({detail})",
           "sessionArchived": "La sesión anterior fue archivada por {agent}. Ejecuta {command} en una terminal para restaurarla y recargarla, o inicia una conversación nueva.",
           "turnFailedRefusal": "{agent} rechazó continuar este turno. Suele indicar un error de backend o pasarela. Revisa los registros del agente.",
           "turnFailedMaxTokens": "{agent} alcanzó el límite máximo de tokens para este turno.",
@@ -4149,7 +4167,8 @@
         "failed": "Error al compactar el contexto",
         "summary": "Resumen",
         "triggerManual": "Activada manualmente",
-        "triggerAutomatic": "Activada automáticamente"
+        "triggerAutomatic": "Activada automáticamente",
+        "triggerIdle": "Activada en inactividad, antes de que caducara la caché del prompt"
       },
       "sessionFailure": {
         "category": {
@@ -4264,15 +4283,6 @@
           "pages": "{count, plural, one {# página} other {# páginas}}",
           "webSearches": "{count, plural, one {# búsqueda web} other {# búsquedas web}}",
           "memories": "{count, plural, one {# consulta de memoria} other {# consultas de memoria}}"
-        },
-        "verb": {
-          "read": "leer",
-          "search": "grep",
-          "glob": "glob",
-          "list": "listar",
-          "fetch": "obtener",
-          "webSearch": "web",
-          "memory": "memoria"
         },
         "stepVerb": {
           "read": "Leyó",
@@ -4684,6 +4694,8 @@
       "questionRequestDesc": "Cuando un agente te hace una pregunta",
       "userPromptSent": "Mensaje del usuario",
       "userPromptSentDesc": "Cuando envías un mensaje (el texto del mensaje se incluye en la notificación)",
+      "topLevelOnly": "Solo sesiones principales",
+      "topLevelOnlyDesc": "Las subsesiones iniciadas por delegación no envían Turno completado ni Error del agente; el agente que delegó informa del resultado al terminar. Sus solicitudes de permiso y preguntas siguen notificándose, porque el agente te está esperando. Se aplica a canales y webhooks.",
       "saved": "Filtro de eventos actualizado.",
       "saveFailed": "Error al guardar el filtro de eventos.",
       "loadFailed": "No se pudo cargar la configuración.",
@@ -4965,7 +4977,7 @@
       "syncFailed": "Error al sincronizar habilidades"
     },
     "autoPreviewLabel": "Abrir vista previa automáticamente",
-    "autoPreviewHint": "Cuando un agente crea o edita un archivo de Word, Excel o PowerPoint, abre su vista previa en vivo automáticamente."
+    "autoPreviewHint": "Cuando las herramientas de un agente crean o editan un archivo de Word, Excel o PowerPoint durante su turno actual, abre su vista previa en vivo automáticamente."
   },
   "SkillPacksSettings": {
     "title": "Paquetes de habilidades",
@@ -5616,6 +5628,10 @@
     "actionStart": "Iniciar",
     "actionSchedule": "Programar",
     "actionCancel": "Cancelar",
+    "actionCancelTask": "Cancelar tarea",
+    "actionRespond": "Responder",
+    "actionRespondHint": "Abre la conversación para atender la solicitud de permiso, la pregunta o el plan del agente",
+    "awaitingInputHint": "El agente está en pausa a la espera de que atiendas una solicitud de permiso, respondas una pregunta o revises un plan. Responde en la conversación y la tarea seguirá sola.",
     "actionRetry": "Reintentar",
     "actionRequeue": "Reencolar",
     "actionViewSession": "Ver conversación",
@@ -5797,6 +5813,7 @@
     "showLess": "Ver menos",
     "detailInfo": "Detalles",
     "detailBranch": "Rama",
+    "detailSource": "Origen",
     "detailMergeCommit": "Commit de fusión",
     "detailChanges": "Cambios",
     "detailScheduled": "Inicio programado",
@@ -5883,6 +5900,12 @@
     "actionDeliverPrUpdateMr": "Actualizar merge request",
     "deliverPrDescriptionLocal": "Envía la rama de esta tarea a {repo} y abre un pull request contra {base}.",
     "deliverPrDescriptionLocalMr": "Envía la rama de esta tarea a {repo} y abre un merge request contra {base}.",
+    "deliverPrDescriptionIssues": "Envía la rama de esta tarea a {repo} y abre un pull request contra {base}. Al fusionarlo se cierran las incidencias marcadas abajo; las demás solo se referencian.",
+    "deliverPrDescriptionIssuesMr": "Envía la rama de esta tarea a {repo} y abre un merge request contra {base}. Al fusionarlo se cierran las incidencias marcadas abajo; las demás solo se referencian.",
+    "deliverPrClosesLabel": "Se cierran al fusionar",
+    "deliverPrClosesHint": "Desmarca la incidencia que este trabajo no resuelva: quedará solo referenciada. La lista se fija en cuanto empieza la entrega.",
+    "deliverPrClosesFixed": "Se fijó en la primera entrega de esta tarea; para cambiarla, edita la descripción del pull request en la forja.",
+    "deliverPrClosesFixedMr": "Se fijó en la primera entrega de esta tarea; para cambiarla, edita la descripción del merge request en la forja.",
     "deliverPrRemoteLoading": "Leyendo el remoto del proyecto…",
     "deliverPrRemoteFailed": "No se pudo leer el remoto del proyecto. Inténtalo de nuevo en un momento.",
     "deliverPrRemoteUnsupported": "El origin de este proyecto no está en GitHub, GitLab ni Gitea, así que no hay dónde abrir un pull request.",
@@ -6291,7 +6314,7 @@
     "noRemote": "Esta carpeta no tiene un remoto reconocible (origin)",
     "errors": {
       "noAccount": "No hay ninguna cuenta de {provider} configurada para {host}. Añade una en Configuración → Control de versiones para cargar este repositorio.",
-      "unsupportedHost": "El panel del repositorio solo admite GitHub, GitLab y Gitea, y {host} no se reconoce como ninguno de ellos. Si es una instancia autoalojada de GitHub Enterprise, GitLab, Gitea o Forgejo, añade una cuenta para ella en Configuración → Control de versiones.",
+      "unsupportedHost": "El panel del repositorio solo admite GitHub, GitLab, Gitea y CNB, y {host} no se reconoce como ninguno de ellos. Si es una instancia autoalojada de GitHub Enterprise, GitLab, Gitea, Forgejo o CNB, añade una cuenta para ella en Configuración → Control de versiones.",
       "wrongForge": "{host} es un {provider}, no la forja con la que estaba clasificado. La detección se ha corregido: vuelve a cargar para reintentar."
     },
     "addAccount": "Añadir una cuenta",
@@ -6450,6 +6473,29 @@
     "creating": "Creando…",
     "createAnyway": "Crear de todos modos",
     "viewExisting": "Ver la tarea existente",
+    "selectItem": "Seleccionar #{number}",
+    "selectBlockedActive": "Esta incidencia ya tiene una tarea en curso",
+    "selectionLabel": "Incidencias seleccionadas",
+    "selectionCount": "{count, plural, one {# seleccionada} other {# seleccionadas}}",
+    "selectionOffPage": "{count, plural, one {# no está en esta lista} other {# no están en esta lista}}",
+    "selectionClear": "Borrar",
+    "combineAction": "Procesar {count} juntas",
+    "combineNeedsTwo": "Elige al menos dos incidencias",
+    "combineTitle": "{count, plural, one {Procesar # incidencia junta} other {Procesar # incidencias juntas}}",
+    "combineDescription": "Crea una sola tarea pendiente en la carpeta de {repo}: un agente trabaja estas incidencias juntas en un único worktree, y tú revisas antes de que se aplique nada.",
+    "combineItemsLabel": "Incidencias de esta tarea",
+    "combineRemoveItem": "Quitar #{number}",
+    "combineScenarioFixHint": "El agente juzga primero cada informe y corrige en un solo cambio los que se sostienen; los que no, los deja intactos y te devuelve la conclusión para que decidas.",
+    "combineScenarioPlanFirstHint": "El agente juzga primero cada informe, entrega un único plan para los que se sostienen y se detiene; apruébalo devolviendo la tarea para implementarlo.",
+    "combineWritebackLabel": "Comentar el resultado en cada incidencia",
+    "combineWritebackHint": "Cuando la tarea termine, codeg publica un comentario en cada una de estas incidencias: el resultado, el enlace y los contadores del diff.",
+    "combineTooFew": "Procesar incidencias juntas requiere al menos dos; para una sola, iníciala desde su fila.",
+    "combineConflictsBody": "Algunas de estas incidencias ya tienen una tarea activa:",
+    "combineConflictItem": "#{number} — {title} ({status})",
+    "combineRemoveConflicts": "Quitar estas incidencias",
+    "combineCreated": "{count, plural, one {Se creó una tarea para # incidencia} other {Se creó una tarea para # incidencias}}",
+    "combineViewBoard": "Ver en el tablero",
+    "combinedWith": "Procesada junto con {numbers}",
     "scenarioLabel": "Cómo tratarlo",
     "scenarioFix": "Corregir / implementar",
     "scenarioFixHint": "El agente juzga primero si el informe se sostiene y solo entonces lo corrige; si no (no se reproduce, funciona según lo previsto, ya está corregido…), no toca nada, termina antes y te devuelve la conclusión para que decidas.",

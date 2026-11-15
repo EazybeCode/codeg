@@ -373,6 +373,10 @@
     "giteaDescription": "Gitea- (und Forgejo-)Konten für die Authentifizierung verwalten. Token werden lokal gespeichert.",
     "giteaTokenHint": "Erstellen Sie unter Gitea → Settings → Applications einen Access Token mit den Scopes write:repository, write:issue und read:user.",
     "giteaNoAccounts": "Noch kein Gitea-Konto",
+    "cnbTitle": "CNB-Konten",
+    "cnbDescription": "Verwalte CNB-Konten (cnb.cool) für die Authentifizierung. Tokens werden lokal gespeichert.",
+    "cnbTokenHint": "Erstelle unter CNB → Persönliche Einstellungen → Zugriffstokens ein Zugriffstoken mit den Scopes account-profile:r, repo-issue:rw, repo-pr:rw, repo-notes:rw und repo-code:rw. Ohne account-profile:r nennt CNB nicht, zu welchem Benutzer das Token gehört, und das Konto lässt sich nicht hinzufügen.",
+    "cnbNoAccounts": "Noch kein CNB-Konto",
     "noAccounts": "Keine GitHub-Konten konfiguriert.",
     "addAccount": "Konto hinzufügen",
     "serverUrl": "Server-URL",
@@ -754,6 +758,16 @@
     "emptyNoAgent": "Keine verfügbaren Agenten.",
     "configManagement": "Konfigurationsverwaltung",
     "envVars": "Umgebungsvariablen",
+    "systemInstructions": {
+      "label": "Systemanweisungen",
+      "hint": "Globale Systemanweisungen für diesen Agenten konfigurieren und in seiner globalen Anweisungsdatei speichern.",
+      "placeholder": "Globale Systemanweisungen im Markdown-Format eingeben, z. B. Rollendefinitionen, Richtlinien und Programmierstandards...",
+      "filePath": "Dateipfad",
+      "unsaved": "Ungespeicherte Änderungen",
+      "discard": "Änderungen verwerfen",
+      "copyPath": "Dateipfad kopieren",
+      "pathCopied": "Dateipfad kopiert"
+    },
     "hostTools": {
       "label": "Dateien und Befehle vom Agenten selbst ausführen lassen",
       "description": "codeg übernimmt Dateizugriffe und Terminalbefehle nicht mehr, sodass der Agent sie im eigenen Prozess ausführt – nur dort greifen seine eigene Sandbox und seine Berechtigungsregeln. Auch das Delegieren an andere Agenten wird deaktiviert, da dieselbe Arbeit sonst wieder über codeg liefe. codeg fügt selbst keine Sandbox hinzu; aktivieren Sie dies also nur, wenn im Agenten eine konfiguriert ist."
@@ -881,6 +895,7 @@
       }
     },
     "actions": {
+      "saveSystemInstructions": "Systemanweisungen speichern",
       "dragSort": "Zum Neuordnen ziehen",
       "dragSortAgent": "{name} zum Neuordnen ziehen",
       "refreshCheck": "Prüfung aktualisieren",
@@ -1380,7 +1395,7 @@
         "hints": {
           "subagentDepth": "Wie tief Sub-Agenten verschachtelt sein dürfen (experimental.subagent_depth). 1 verhindert, dass ein Sub-Agent einen weiteren startet.",
           "preserveRecentTokens": "Token-Budget der letzten Runden, die nach einer Verdichtung wörtlich erhalten bleiben (compaction.keep.tokens). Standard 15000.",
-          "reserved": "Freigehaltenes Fenster, damit eine Verdichtung den Kontext nie sprengt (compaction.buffer). Ohne Wert werden 15 % des Fensters reserviert, mindestens 16K.",
+          "reserved": "Platz, der im Kontextfenster vor der automatischen Verdichtung frei bleibt (compaction.buffer): eine Tokenzahl wie <code>20000</code> oder ein Anteil des Fensters von <code>1%</code> bis <code>99%</code>, etwa <code>20%</code>. Ohne Wert bleiben <code>15%</code> des Fensters frei, mindestens <code>16000</code> Tokens.",
           "maxLines": "Längere Ausgaben werden auf die Festplatte geschrieben und durch eine Vorschau ersetzt. Standard 2000.",
           "maxBytes": "Größere Ausgaben werden auf die Festplatte geschrieben und durch eine Vorschau ersetzt. Standard 51200."
         }
@@ -1574,6 +1589,8 @@
       "openCodeAuthRecovered": "OpenCode auth.json ist ungültig; auf Standardkonfiguration zurückgesetzt"
     },
     "toasts": {
+      "systemInstructionsSaved": "Systemanweisungen gespeichert",
+      "saveSystemInstructionsFailed": "Systemanweisungen konnten nicht gespeichert werden",
       "agentActionCompleted": "{name} {action} abgeschlossen",
       "agentActionFailed": "{name} {action} fehlgeschlagen",
       "localVersion": "Lokale Version: {version}",
@@ -3284,6 +3301,7 @@
           "sessionLoadResourceNotFound": "{agent}-Sitzung konnte nicht geladen werden. Neu laden, um es erneut zu versuchen, oder eine neue Konversation starten.",
           "sessionLoadUnavailable": "{agent} konnte diese Sitzung nicht wiederherstellen – sie wurde möglicherweise beendet oder der Agent wurde gestoppt. Neu laden, um es erneut zu versuchen, oder eine neue Konversation starten.",
           "sessionLoadBusy": "Diese Sitzung ist an anderer Stelle geöffnet. Hat ein anderer {agent}-Client (App, CLI oder IDE-Erweiterung) sie offen, schließe sie dort oder beende diesen Client und lade dann neu. Hast du sie gerade verzweigt, lade in etwa einer Minute neu.",
+          "sessionLoadProviderMismatch": "Diese Unterhaltung wurde mit einem anderen Modellanbieter begonnen, als {agent} jetzt verwendet, und {agent} setzt eine Unterhaltung nur mit ihrem eigenen Anbieter fort. Wechsle in den Einstellungen von {agent} zurück zu diesem Anbieter und lade neu, oder beginne eine neue Unterhaltung. ({detail})",
           "sessionArchived": "Die vorherige Sitzung wurde auf {agent}-Seite archiviert. Führe {command} im Terminal aus, um sie wiederherzustellen und neu zu laden, oder starte eine neue Unterhaltung.",
           "turnFailedRefusal": "{agent} hat die Fortsetzung dieser Runde abgelehnt. Häufig deutet das auf einen Backend- oder Gateway-Fehler hin. Bitte prüfen Sie die Agent-Logs.",
           "turnFailedMaxTokens": "{agent} hat das Token-Limit für diese Runde erreicht.",
@@ -4149,7 +4167,8 @@
         "failed": "Kontextkomprimierung fehlgeschlagen",
         "summary": "Zusammenfassung",
         "triggerManual": "Manuell ausgelöst",
-        "triggerAutomatic": "Automatisch ausgelöst"
+        "triggerAutomatic": "Automatisch ausgelöst",
+        "triggerIdle": "Im Leerlauf ausgelöst, bevor der Prompt-Cache ablief"
       },
       "sessionFailure": {
         "category": {
@@ -4264,15 +4283,6 @@
           "pages": "{count, plural, one {# Seite} other {# Seiten}}",
           "webSearches": "{count, plural, one {# Websuche} other {# Websuchen}}",
           "memories": "{count, plural, one {# Speicherabruf} other {# Speicherabrufe}}"
-        },
-        "verb": {
-          "read": "lesen",
-          "search": "grep",
-          "glob": "glob",
-          "list": "liste",
-          "fetch": "abruf",
-          "webSearch": "suche",
-          "memory": "abruf"
         },
         "stepVerb": {
           "read": "Gelesen",
@@ -4684,6 +4694,8 @@
       "questionRequestDesc": "Wenn ein Agent dir eine Frage stellt",
       "userPromptSent": "Benutzernachricht",
       "userPromptSentDesc": "Wenn du eine Nachricht sendest – der Nachrichtentext ist in der Benachrichtigung enthalten",
+      "topLevelOnly": "Nur Hauptsitzungen",
+      "topLevelOnlyDesc": "Per Delegation gestartete Untersitzungen senden weder „Runde abgeschlossen“ noch „Agentenfehler“; der delegierende Agent meldet ihr Ergebnis, wenn er fertig ist. Ihre Berechtigungsanfragen und Fragen werden weiter gemeldet, weil der Agent auf dich wartet. Gilt für Kanäle und Webhooks.",
       "saved": "Ereignisfilter aktualisiert.",
       "saveFailed": "Fehler beim Speichern des Ereignisfilters.",
       "loadFailed": "Einstellungen konnten nicht geladen werden.",
@@ -4965,7 +4977,7 @@
       "syncFailed": "Skills konnten nicht synchronisiert werden"
     },
     "autoPreviewLabel": "Vorschau automatisch öffnen",
-    "autoPreviewHint": "Wenn ein Agent eine Word-, Excel- oder PowerPoint-Datei erstellt oder bearbeitet, wird die Live-Vorschau automatisch geöffnet."
+    "autoPreviewHint": "Wenn die Werkzeuge eines Agenten während seines aktuellen Durchgangs eine Word-, Excel- oder PowerPoint-Datei erstellen oder bearbeiten, wird die Live-Vorschau automatisch geöffnet."
   },
   "SkillPacksSettings": {
     "title": "Skill-Pakete",
@@ -5616,6 +5628,10 @@
     "actionStart": "Starten",
     "actionSchedule": "Planen",
     "actionCancel": "Abbrechen",
+    "actionCancelTask": "Aufgabe abbrechen",
+    "actionRespond": "Antworten",
+    "actionRespondHint": "Öffnet die Konversation, um auf die Berechtigungsanfrage, Frage oder den Plan des Agenten zu reagieren",
+    "awaitingInputHint": "Der Agent pausiert und wartet darauf, dass du über eine Berechtigungsanfrage entscheidest, eine Frage beantwortest oder einen Plan prüfst. Antworte in der Konversation, dann läuft die Aufgabe von selbst weiter.",
     "actionRetry": "Erneut versuchen",
     "actionRequeue": "Erneut einreihen",
     "actionViewSession": "Konversation anzeigen",
@@ -5797,6 +5813,7 @@
     "showLess": "Weniger anzeigen",
     "detailInfo": "Details",
     "detailBranch": "Branch",
+    "detailSource": "Quelle",
     "detailMergeCommit": "Merge-Commit",
     "detailChanges": "Änderungen",
     "detailScheduled": "Geplanter Start",
@@ -5883,6 +5900,12 @@
     "actionDeliverPrUpdateMr": "Merge Request aktualisieren",
     "deliverPrDescriptionLocal": "Pusht den Branch dieser Aufgabe nach {repo} und öffnet einen Pull Request gegen {base}.",
     "deliverPrDescriptionLocalMr": "Pusht den Branch dieser Aufgabe nach {repo} und öffnet einen Merge Request gegen {base}.",
+    "deliverPrDescriptionIssues": "Pusht den Branch dieser Aufgabe nach {repo} und öffnet einen Pull Request gegen {base}. Beim Mergen werden die unten angehakten Issues geschlossen; die übrigen werden nur verknüpft.",
+    "deliverPrDescriptionIssuesMr": "Pusht den Branch dieser Aufgabe nach {repo} und öffnet einen Merge Request gegen {base}. Beim Mergen werden die unten angehakten Issues geschlossen; die übrigen werden nur verknüpft.",
+    "deliverPrClosesLabel": "Beim Mergen schließen",
+    "deliverPrClosesHint": "Entferne den Haken bei einem Issue, das diese Arbeit nicht löst – es wird dann nur verknüpft. Die Liste steht fest, sobald die Übergabe beginnt.",
+    "deliverPrClosesFixed": "Bei der ersten Übergabe dieser Aufgabe festgelegt – um sie zu ändern, bearbeite die Beschreibung des Pull Requests auf der Forge.",
+    "deliverPrClosesFixedMr": "Bei der ersten Übergabe dieser Aufgabe festgelegt – um sie zu ändern, bearbeite die Beschreibung des Merge Requests auf der Forge.",
     "deliverPrRemoteLoading": "Remote des Projekts wird gelesen…",
     "deliverPrRemoteFailed": "Das Remote des Projekts konnte nicht gelesen werden. Versuche es gleich noch einmal.",
     "deliverPrRemoteUnsupported": "Der origin dieses Projekts liegt nicht auf GitHub, GitLab oder Gitea, daher kann kein Pull Request geöffnet werden.",
@@ -6291,7 +6314,7 @@
     "noRemote": "Dieser Ordner hat kein erkennbares Forge-Remote (origin)",
     "errors": {
       "noAccount": "Für {host} ist kein {provider}-Konto konfiguriert. Füge unter Einstellungen → Versionskontrolle eines hinzu, um dieses Repository zu laden.",
-      "unsupportedHost": "Das Repository-Panel unterstützt nur GitHub, GitLab und Gitea, und {host} wird als keines davon erkannt. Falls es sich um eine selbst gehostete GitHub-Enterprise-, GitLab-, Gitea- oder Forgejo-Instanz handelt, füge unter Einstellungen → Versionskontrolle ein Konto dafür hinzu.",
+      "unsupportedHost": "Das Repository-Panel unterstützt nur GitHub, GitLab, Gitea und CNB, und {host} wird als keines davon erkannt. Falls es sich um eine selbst gehostete GitHub-Enterprise-, GitLab-, Gitea-, Forgejo- oder CNB-Instanz handelt, füge unter Einstellungen → Versionskontrolle ein Konto dafür hinzu.",
       "wrongForge": "{host} ist ein {provider} und nicht die Forge, als die es eingestuft war. Die Erkennung wurde korrigiert — neu laden, um es erneut zu versuchen."
     },
     "addAccount": "Konto hinzufügen",
@@ -6450,6 +6473,29 @@
     "creating": "Erstelle…",
     "createAnyway": "Trotzdem erstellen",
     "viewExisting": "Bestehende Aufgabe ansehen",
+    "selectItem": "#{number} auswählen",
+    "selectBlockedActive": "Für dieses Issue läuft bereits eine Aufgabe",
+    "selectionLabel": "Ausgewählte Issues",
+    "selectionCount": "{count} ausgewählt",
+    "selectionOffPage": "{count} davon nicht in dieser Liste",
+    "selectionClear": "Leeren",
+    "combineAction": "{count} gemeinsam bearbeiten",
+    "combineNeedsTwo": "Wähle mindestens zwei Issues",
+    "combineTitle": "{count, plural, one {# Issue gemeinsam bearbeiten} other {# Issues gemeinsam bearbeiten}}",
+    "combineDescription": "Erstellt eine einzige To-do-Aufgabe im Ordner von {repo} — ein Agent bearbeitet diese Issues gemeinsam in einem Worktree, du prüfst vor dem Landen.",
+    "combineItemsLabel": "Issues dieser Aufgabe",
+    "combineRemoveItem": "#{number} entfernen",
+    "combineScenarioFixHint": "Der Agent prüft jeden Bericht zuerst und behebt die stichhaltigen in einer gemeinsamen Änderung – die übrigen rührt er nicht an und gibt dir den Befund zur Entscheidung zurück.",
+    "combineScenarioPlanFirstHint": "Der Agent prüft jeden Bericht zuerst, liefert dann einen gemeinsamen Plan für die stichhaltigen und stoppt – gib ihn frei, indem du die Aufgabe zur Umsetzung zurückgibst.",
+    "combineWritebackLabel": "Ergebnis bei jedem Issue kommentieren",
+    "combineWritebackHint": "Wenn die Aufgabe fertig ist, schreibt codeg zu jedem dieser Issues einen Kommentar: Ergebnis, Link und Diff-Zahlen.",
+    "combineTooFew": "Gemeinsam bearbeiten geht erst ab zwei Issues – ein einzelnes startest du in seiner eigenen Zeile.",
+    "combineConflictsBody": "Einige dieser Issues bearbeitet bereits eine aktive Aufgabe:",
+    "combineConflictItem": "#{number} — {title} ({status})",
+    "combineRemoveConflicts": "Diese Issues entfernen",
+    "combineCreated": "{count, plural, one {Eine Aufgabe für # Issue erstellt} other {Eine Aufgabe für # Issues erstellt}}",
+    "combineViewBoard": "Im Board ansehen",
+    "combinedWith": "Gemeinsam bearbeitet mit {numbers}",
     "scenarioLabel": "Vorgehen",
     "scenarioFix": "Direkt beheben / umsetzen",
     "scenarioFixHint": "Der Agent prüft zuerst, ob der Bericht stimmt, und behebt erst dann – stimmt er nicht (nicht reproduzierbar, gewolltes Verhalten, schon behoben …), ändert er nichts, bricht früh ab und gibt dir den Befund zur Entscheidung zurück.",

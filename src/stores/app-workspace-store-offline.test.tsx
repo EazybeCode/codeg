@@ -140,6 +140,7 @@ it("preserves a restored composer draft until an authoritative folder snapshot a
     kind: "regular",
     alias: null,
     group_id: null,
+    repo_full_name: null,
   }
   mocks.listOpenFolders.mockResolvedValue([folder])
   mocks.listAllFolders.mockResolvedValue([folder])

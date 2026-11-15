@@ -465,6 +465,130 @@ async fn the_validator_refuses_a_database_that_still_has_a_byte_ceiling() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// DOCX in the content-type CHECK, on a database already at the current schema
+// ---------------------------------------------------------------------------
+
+const DOCX: &str = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+
+/// Insert one DOCX attachment, returning whether the database took it. Nothing
+/// else about the row varies, so a refusal here is the content-type CHECK.
+async fn try_insert_docx(db: &DatabaseConnection, org_id: i32, chat_id: &str) -> bool {
+    db.execute(statement(
+        db,
+        "INSERT INTO neev_attachments(org_id,key,chat_id,session_id,file_name,content_type,byte_length,sha256,created_by,created_at) VALUES($1,$2,$3,NULL,'brief.docx',$4,64,$5,1,0)",
+        vec![
+            org_id.into(),
+            uuid::Uuid::new_v4().hyphenated().to_string().into(),
+            chat_id.to_owned().into(),
+            DOCX.into(),
+            "c".repeat(64).into(),
+        ],
+    ))
+    .await
+    .is_ok()
+}
+
+/// Put the content-type CHECK back to what it was before DOCX support, leaving
+/// the schema marker and every table where the current schema has them. This is
+/// the state of a database that reached the current schema on an earlier
+/// release. The table is still empty here, as in `restore_the_old_byte_ceiling`.
+async fn restore_the_pre_docx_content_types(db: &DatabaseConnection) {
+    let ddl = attachments_ddl(db).await;
+    let with_docx = format!("'application/pdf','{DOCX}','text/plain'");
+    assert!(
+        ddl.contains(&with_docx),
+        "expected the DOCX content type to rewrite: {ddl}"
+    );
+    let old = ddl
+        .replacen("neev_attachments", "neev_attachments_pre_docx", 1)
+        .replace(&with_docx, "'application/pdf','text/plain'");
+    let indexes = db
+        .query_all(statement(
+            db,
+            "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name='neev_attachments' AND sql IS NOT NULL",
+            vec![],
+        ))
+        .await
+        .unwrap();
+    execute(db, "PRAGMA defer_foreign_keys=ON", vec![]).await;
+    execute(db, &old, vec![]).await;
+    execute(db, "DROP TABLE neev_attachments", vec![]).await;
+    execute(
+        db,
+        "ALTER TABLE neev_attachments_pre_docx RENAME TO neev_attachments",
+        vec![],
+    )
+    .await;
+    for index in &indexes {
+        let sql: String = index.try_get("", "sql").unwrap();
+        execute(db, &sql, vec![]).await;
+    }
+    execute(db, "PRAGMA defer_foreign_keys=OFF", vec![]).await;
+    assert!(
+        !attachments_ddl(db).await.contains(DOCX),
+        "DOCX must be gone before the restart is asked to add it"
+    );
+}
+
+/// A database already at the current schema, but created before DOCX support,
+/// gains DOCX on the next start and keeps every row.
+///
+/// The startup gate that widens the CHECK listed the schemas up to 24 and left
+/// out the current one. A schema-25 database therefore kept the narrow CHECK
+/// for good: every later start validated it in place and never widened it, and
+/// production had to be corrected by hand.
+#[tokio::test]
+async fn a_current_schema_database_from_before_docx_gains_it_on_restart() {
+    let harness = h::OrgHarness::new().await;
+    let (org_id, chat_id, message_id, session_id) = seed(&harness).await;
+    let db = harness.state().database.clone();
+
+    restore_the_pre_docx_content_types(&db).await;
+    assert_eq!(schema_version(&db).await, CURRENT_SCHEMA_VERSION);
+    // Rows written before DOCX support, including references.
+    let (on_chat, on_session) = attach(&db, org_id, &chat_id, &message_id, &session_id).await;
+    let rows_before = count(&db, "neev_attachments").await;
+    let refs_before = count(&db, "neev_attachment_refs").await;
+    assert_eq!(rows_before, 2);
+    assert_eq!(refs_before, 2);
+    // The bug, reproduced: a DOCX cannot be stored.
+    assert!(
+        !try_insert_docx(&db, org_id, &chat_id).await,
+        "precondition: the pre-DOCX CHECK refuses a DOCX"
+    );
+
+    // Re-open, exactly as a restart does. This is what widens the CHECK.
+    assert_eq!(initialize(&db).await, Ok(()));
+
+    assert!(attachments_ddl(&db).await.contains(DOCX));
+    // Nothing was dropped, and the schema marker did not move.
+    assert_eq!(count(&db, "neev_attachments").await, rows_before);
+    assert_eq!(count(&db, "neev_attachment_refs").await, refs_before);
+    assert_eq!(schema_version(&db).await, CURRENT_SCHEMA_VERSION);
+    for key in [&on_chat, &on_session] {
+        assert!(one(
+            &db,
+            "SELECT key FROM neev_attachments WHERE org_id=$1 AND key=$2",
+            vec![org_id.into(), key.clone().into()],
+        )
+        .await
+        .unwrap()
+        .is_some());
+    }
+    assert_eq!(attachment_migration::validate(&db).await, Ok(()));
+
+    // The fix: a DOCX now stores.
+    assert!(
+        try_insert_docx(&db, org_id, &chat_id).await,
+        "a DOCX must be storable after the restart"
+    );
+    // Idempotent: a second open changes nothing and still validates.
+    assert_eq!(initialize(&db).await, Ok(()));
+    assert_eq!(attachment_migration::validate(&db).await, Ok(()));
+    assert_eq!(count(&db, "neev_attachments").await, rows_before + 1);
+}
+
 #[tokio::test]
 async fn schema_sixteen_upgrade_preserves_attachment_refs_and_archive_on_reopen() {
     let harness = h::OrgHarness::new().await;

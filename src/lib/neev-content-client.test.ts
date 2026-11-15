@@ -323,7 +323,7 @@ describe("native content wire validation", () => {
     // text must never escape into a user-facing error.
     expect(String(missing)).not.toContain("private path leaked")
     expect(String(expired)).not.toContain("expired session")
-    expect(expired.code).toBeUndefined()
+    expect((expired as { code?: unknown }).code).toBeUndefined()
   })
 
   it("uses the session CSRF contract for mutations", async () => {
