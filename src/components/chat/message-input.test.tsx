@@ -168,7 +168,6 @@ vi.mock("@/lib/platform", () => ({
 }))
 vi.mock("@/lib/transport", () => ({
   getTransport: () => managedHttp.transport,
-  isDesktop: () => false,
   getActiveRemoteConnectionId: () => null,
   isDesktop: () => false,
   isRemoteDesktopMode: () => false,

@@ -336,7 +336,10 @@ describe("the controls on a saved agent chat", () => {
     })
     // Record bodies through the same fetch mock the helper installed.
     const fetcher = globalThis.fetch as unknown as ReturnType<typeof vi.fn>
-    const original = fetcher.getMockImplementation()!
+    const original = fetcher.getMockImplementation() as (
+      path: string,
+      init: RequestInit
+    ) => unknown
     fetcher.mockImplementation(async (path: string, init: RequestInit = {}) => {
       if (`${init.method ?? "GET"} ${path}` === SETTINGS)
         patches.push(JSON.parse(init.body as string))
