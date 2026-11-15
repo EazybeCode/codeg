@@ -54,6 +54,7 @@ const managedHttp = vi.hoisted(() => ({
 vi.mock("@/contexts/acp-connections-context", () => ({
   useAcpActions: () => ({
     setActiveKey: vi.fn(),
+    releaseActiveKey: vi.fn(),
     touchActivity: vi.fn(),
     attachWorkspaceViewer: managedAgent.attach,
   }),
@@ -81,6 +82,9 @@ vi.mock("@/hooks/use-connection", () => ({
     hasCachedSelectors: false,
     isViewer: false,
     backgroundOutstanding: 0,
+    asyncTasks: [],
+    remoteControl: null,
+    delegatedChildren: [],
   }),
 }))
 
@@ -2394,6 +2398,27 @@ describe("MessageInput slash menu for skills an agent does not advertise", () =>
     expect(agentSkills).toHaveBeenCalledWith("antigravity", null)
   })
 
+  it("lists custom ACP agents' skills from disk after their commands", async () => {
+    agentSkills.mockReturnValue([DEPLOY, SHADOWED])
+    await mountAndType({
+      agentType: "custom:antigravity-b",
+      availableCommands: COMMANDS,
+    })
+
+    const menu = await screen.findByTestId("slash-menu")
+    const rows = within(menu)
+      .getAllByRole("button")
+      .map((row) => row.textContent)
+    expect(rows).toEqual([
+      expect.stringMatching(/^\/plan/),
+      expect.stringMatching(/^\/logout/),
+      expect.stringMatching(/^\/usage/),
+      "DeployShip the build",
+    ])
+    expect(within(menu).queryByText("Plan skill")).toBeNull()
+    expect(agentSkills).toHaveBeenCalledWith("custom:antigravity-b", null)
+  })
+
   it("inserts a picked Antigravity skill as its `/` token", async () => {
     agentSkills.mockReturnValue([DEPLOY])
     const { editor } = await mountAndType(
@@ -2438,6 +2463,70 @@ describe("MessageInput slash menu for skills an agent does not advertise", () =>
     })
     const menu = await screen.findByTestId("slash-menu")
     expect(within(menu).getByText("Deploy")).toBeInTheDocument()
+  })
+
+  // OpenCode 1.x advertised every skill as a command; 2.x advertises only its
+  // commands, so after the move to 2.x its `/` menu showed just these four
+  // (#1089). Its skills now come from disk, as Antigravity's do.
+  it("lists OpenCode's skills from disk after its commands", async () => {
+    // What opencode 2.2.5 advertises with no MCP prompts or custom commands.
+    const OPENCODE_COMMANDS = [
+      { name: "init", description: "guided AGENTS.md setup" },
+      {
+        name: "review",
+        description:
+          "review changes [commit|branch|pr], defaults to uncommitted",
+      },
+      {
+        name: "goal",
+        description:
+          "keep working until an objective is met [pause|resume|clear]",
+      },
+      { name: "compact", description: "Compact the session" },
+    ]
+    // Sending `/review` runs OpenCode's command, never a skill of that name.
+    const REVIEW_SKILL = { ...SHADOWED, id: "review", name: "Review skill" }
+    agentSkills.mockReturnValue([DEPLOY, REVIEW_SKILL])
+    const { editor } = await mountAndType({
+      agentType: "open_code",
+      availableCommands: OPENCODE_COMMANDS,
+    })
+
+    const menu = await screen.findByTestId("slash-menu")
+    const rows = within(menu)
+      .getAllByRole("button")
+      .map((row) => row.textContent)
+    expect(rows).toEqual([
+      expect.stringMatching(/^\/init/),
+      expect.stringMatching(/^\/review/),
+      expect.stringMatching(/^\/goal/),
+      expect.stringMatching(/^\/compact/),
+      "DeployShip the build",
+    ])
+    expect(within(menu).queryByText("Review skill")).toBeNull()
+    expect(agentSkills).toHaveBeenCalledWith("open_code", null)
+
+    // Picking it inserts the `/` token OpenCode passes to its model as written.
+    act(() => {
+      editor.commands.insertContent("dep")
+    })
+    await waitFor(() =>
+      expect(
+        within(screen.getByTestId("slash-menu")).getAllByRole("button")
+      ).toHaveLength(1)
+    )
+    act(() => {
+      ;(editor.view.dom as HTMLElement).dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Enter",
+          bubbles: true,
+          cancelable: true,
+        })
+      )
+    })
+    await waitFor(() =>
+      expect(composerHandle.current?.getText()).toBe("/deploy ")
+    )
   })
 
   it("keeps a `$` typed for Antigravity as plain text", async () => {

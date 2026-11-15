@@ -43,6 +43,7 @@ let connectionStatus = "connected"
 vi.mock("@/contexts/acp-connections-context", () => ({
   useAcpActions: () => ({
     setActiveKey: vi.fn(),
+    releaseActiveKey: vi.fn(),
     touchActivity: vi.fn(),
     attachWorkspaceViewer,
   }),
@@ -72,6 +73,9 @@ vi.mock("@/hooks/use-connection", () => ({
     hasCachedSelectors: true,
     isViewer: false,
     backgroundOutstanding: 0,
+    asyncTasks: [],
+    remoteControl: null,
+    delegatedChildren: [],
   }),
 }))
 

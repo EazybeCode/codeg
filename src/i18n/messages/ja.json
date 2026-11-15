@@ -373,6 +373,10 @@
     "giteaDescription": "認証用の Gitea（および Forgejo）アカウントを管理します。トークンはローカルに保存されます。",
     "giteaTokenHint": "Gitea → Settings → Applications で write:repository、write:issue、read:user スコープ付きのアクセストークンを作成してください。",
     "giteaNoAccounts": "Gitea アカウントがまだありません",
+    "cnbTitle": "CNB アカウント",
+    "cnbDescription": "認証用の CNB（cnb.cool）アカウントを管理します。トークンはローカルに保存されます。",
+    "cnbTokenHint": "CNB の「個人設定 → アクセストークン」で、account-profile:r、repo-issue:rw、repo-pr:rw、repo-notes:rw、repo-code:rw のスコープを付けてアクセストークンを作成してください。account-profile:r がないと CNB はトークンの持ち主を返さないため、アカウントを追加できません。",
+    "cnbNoAccounts": "CNB アカウントはまだありません",
     "noAccounts": "GitHub アカウントが設定されていません。",
     "addAccount": "アカウントを追加",
     "serverUrl": "サーバー URL",
@@ -754,6 +758,16 @@
     "emptyNoAgent": "利用可能なエージェントがありません。",
     "configManagement": "設定管理",
     "envVars": "環境変数",
+    "systemInstructions": {
+      "label": "システム指示",
+      "hint": "このエージェントのグローバルなシステム指示を設定し、グローバル指示ファイルに保存します。",
+      "placeholder": "グローバルなシステム指示を Markdown 形式で入力してください（役割の定義、ガイドライン、コーディング規約など）...",
+      "filePath": "ファイルパス",
+      "unsaved": "未保存の変更があります",
+      "discard": "変更を破棄",
+      "copyPath": "ファイルパスをコピー",
+      "pathCopied": "ファイルパスをコピーしました"
+    },
     "hostTools": {
       "label": "ファイルとコマンドをエージェント自身に処理させる",
       "description": "codeg がファイルアクセスとターミナルコマンドを代行しなくなり、エージェントが自身のプロセスで実行します。そうすることで初めて、エージェント自身のサンドボックスと権限ルールが適用されます。他のエージェントへの委任も無効になります（同じ処理が codeg 経由に戻ってしまうため）。codeg 自体はサンドボックスを提供しないため、エージェント側でサンドボックスを設定済みの場合にのみ有効にしてください。"
@@ -881,6 +895,7 @@
       }
     },
     "actions": {
+      "saveSystemInstructions": "システム指示を保存",
       "dragSort": "ドラッグして並べ替え",
       "dragSortAgent": "{name} をドラッグして並べ替え",
       "refreshCheck": "再チェック",
@@ -1380,7 +1395,7 @@
         "hints": {
           "subagentDepth": "サブエージェントを何段までネストできるか（experimental.subagent_depth）。1 ならサブエージェントはさらに別のサブエージェントを起動できません。",
           "preserveRecentTokens": "コンパクション後も原文のまま残す直近ターンのトークン予算（compaction.keep.tokens）。既定値 15000。",
-          "reserved": "コンパクション自体がコンテキストを溢れさせないよう空けておくウィンドウ（compaction.buffer）。未設定ならウィンドウの 15%（最低 16K）を確保します。",
+          "reserved": "自動コンパクションの前にコンテキストウィンドウで空けておく領域（compaction.buffer）。トークン数（例: <code>20000</code>）か、ウィンドウに対する割合（<code>1%</code>〜<code>99%</code>、例: <code>20%</code>）で指定します。未設定ならウィンドウの <code>15%</code>（最低 <code>16000</code> トークン）を空けます。",
           "maxLines": "これを超える出力はディスクに書き出され、プレビューだけが残ります。既定 2000。",
           "maxBytes": "これを超える出力はディスクに書き出され、プレビューだけが残ります。既定 51200。"
         }
@@ -1574,6 +1589,8 @@
       "openCodeAuthRecovered": "OpenCode の auth.json が不正のため、デフォルト設定にリセットしました"
     },
     "toasts": {
+      "systemInstructionsSaved": "システム指示を保存しました",
+      "saveSystemInstructionsFailed": "システム指示の保存に失敗しました",
       "agentActionCompleted": "{name} の {action} が完了しました",
       "agentActionFailed": "{name} の {action} に失敗しました",
       "localVersion": "ローカルバージョン: {version}",
@@ -3284,6 +3301,7 @@
           "sessionLoadResourceNotFound": "{agent} セッションの読み込みに失敗しました。再読み込みして再試行するか、新しい会話を開始してください。",
           "sessionLoadUnavailable": "{agent} はこのセッションを復元できませんでした。セッションが終了したか、エージェントが停止した可能性があります。再読み込みして再試行するか、新しい会話を開始してください。",
           "sessionLoadBusy": "このセッションは別の場所で開かれています。別の {agent} クライアント（デスクトップアプリ、CLI、IDE 拡張機能）で開いている場合は、そちらで閉じるかそのクライアントを終了してから再読み込みしてください。ここから分岐した直後なら、1 分ほどしてから再読み込みしてください。",
+          "sessionLoadProviderMismatch": "この会話は、{agent} が現在使っているものとは別のモデルプロバイダーで始められました。{agent} は会話を元のプロバイダーでしか続けません。{agent} の設定でそのプロバイダーに戻してから再読み込みするか、新しい会話を始めてください。（{detail}）",
           "sessionArchived": "以前のセッションは {agent} 側でアーカイブされています。ターミナルで {command} を実行して復元してから再読み込みするか、新しい会話を開始してください。",
           "turnFailedRefusal": "{agent} がこのターンの続行を拒否しました。バックエンドまたはゲートウェイのエラーが原因の可能性があります。エージェントのログを確認してください。",
           "turnFailedMaxTokens": "{agent} がこのターンの最大トークン数に達しました。",
@@ -4149,7 +4167,8 @@
         "failed": "コンテキストの圧縮に失敗しました",
         "summary": "要約",
         "triggerManual": "手動で実行",
-        "triggerAutomatic": "自動で実行"
+        "triggerAutomatic": "自動で実行",
+        "triggerIdle": "アイドル中、プロンプトキャッシュの期限切れ前に実行"
       },
       "sessionFailure": {
         "category": {
@@ -4264,15 +4283,6 @@
           "pages": "ページ {count} 件",
           "webSearches": "Web 検索 {count} 件",
           "memories": "メモリ参照 {count} 件"
-        },
-        "verb": {
-          "read": "読取",
-          "search": "検索",
-          "glob": "照合",
-          "list": "一覧",
-          "fetch": "取得",
-          "webSearch": "Web検索",
-          "memory": "想起"
         },
         "stepVerb": {
           "read": "読み取り",
@@ -4684,6 +4694,8 @@
       "questionRequestDesc": "エージェントが質問したとき",
       "userPromptSent": "ユーザーメッセージ",
       "userPromptSentDesc": "メッセージを送信したとき（通知に本文が含まれます）",
+      "topLevelOnly": "トップレベルのセッションのみ",
+      "topLevelOnlyDesc": "委任で起動したサブセッションは「ターン完了」と「エージェントエラー」を送信しません。結果は委任元のエージェントが完了時に報告します。サブセッションの権限リクエストと質問はエージェントが応答を待つため引き続き通知されます。チャンネルと Webhook の両方に適用されます。",
       "saved": "イベントフィルターを更新しました。",
       "saveFailed": "イベントフィルターの保存に失敗しました。",
       "loadFailed": "設定の読み込みに失敗しました。",
@@ -4965,7 +4977,7 @@
       "syncFailed": "スキルの同期に失敗"
     },
     "autoPreviewLabel": "プレビューを自動で開く",
-    "autoPreviewHint": "エージェントが Word、Excel、PowerPoint ファイルを作成または編集したときに、ライブプレビューを自動で開きます。"
+    "autoPreviewHint": "エージェントが現在のターンでツールを使って Word、Excel、PowerPoint ファイルを作成または編集したときに、ライブプレビューを自動で開きます。"
   },
   "SkillPacksSettings": {
     "title": "スキルパック",
@@ -5616,6 +5628,10 @@
     "actionStart": "開始",
     "actionSchedule": "予約実行",
     "actionCancel": "キャンセル",
+    "actionCancelTask": "タスクをキャンセル",
+    "actionRespond": "応答する",
+    "actionRespondHint": "会話を開いて、エージェントの権限リクエスト・質問・計画の承認に対応します",
+    "awaitingInputHint": "エージェントは一時停止し、権限リクエストへの対応、質問への回答、または計画の承認を待っています。会話で応答すると、タスクは自動的に再開します。",
     "actionRetry": "再試行",
     "actionRequeue": "再キュー",
     "actionViewSession": "会話を表示",
@@ -5797,6 +5813,7 @@
     "showLess": "折りたたむ",
     "detailInfo": "詳細",
     "detailBranch": "ブランチ",
+    "detailSource": "ソース",
     "detailMergeCommit": "マージコミット",
     "detailChanges": "変更",
     "detailScheduled": "開始予定",
@@ -5883,6 +5900,12 @@
     "actionDeliverPrUpdateMr": "マージリクエストを更新",
     "deliverPrDescriptionLocal": "このタスクのブランチを {repo} にプッシュし、{base} 向けのプルリクエストを作成します。",
     "deliverPrDescriptionLocalMr": "このタスクのブランチを {repo} にプッシュし、{base} 向けのマージリクエストを作成します。",
+    "deliverPrDescriptionIssues": "このタスクのブランチを {repo} にプッシュし、{base} 向けのプルリクエストを作成します。マージすると下でチェックしたイシューがクローズされ、それ以外はリンクのみです。",
+    "deliverPrDescriptionIssuesMr": "このタスクのブランチを {repo} にプッシュし、{base} 向けのマージリクエストを作成します。マージすると下でチェックしたイシューがクローズされ、それ以外はリンクのみです。",
+    "deliverPrClosesLabel": "マージ時にクローズ",
+    "deliverPrClosesHint": "この変更で解決していないイシューはチェックを外してください。リンクだけになります。デリバリーを始めると一覧は確定します。",
+    "deliverPrClosesFixed": "このタスクの最初のデリバリーで確定済みです。変更するには、フォージ上でプルリクエストの説明を編集してください。",
+    "deliverPrClosesFixedMr": "このタスクの最初のデリバリーで確定済みです。変更するには、フォージ上でマージリクエストの説明を編集してください。",
     "deliverPrRemoteLoading": "プロジェクトのリモートを読み込んでいます…",
     "deliverPrRemoteFailed": "プロジェクトのリモートを読み込めませんでした。しばらくしてからもう一度お試しください。",
     "deliverPrRemoteUnsupported": "このプロジェクトの origin は GitHub・GitLab・Gitea のいずれでもないため、プルリクエストを作成できません。",
@@ -6291,7 +6314,7 @@
     "noRemote": "このフォルダには認識できるリモート（origin）がありません",
     "errors": {
       "noAccount": "{host} の {provider} アカウントが設定されていません。「設定 → バージョン管理」で追加するとこのリポジトリを読み込めます。",
-      "unsupportedHost": "リポジトリパネルは GitHub、GitLab、Gitea にのみ対応しており、{host} はそのいずれとしても認識できません。自己ホスト型の GitHub Enterprise、GitLab、Gitea、Forgejo インスタンスであれば、「設定 → バージョン管理」でアカウントを追加してください。",
+      "unsupportedHost": "リポジトリパネルは GitHub、GitLab、Gitea、CNB にのみ対応しており、{host} はそのいずれとしても認識できません。自己ホスト型の GitHub Enterprise、GitLab、Gitea、Forgejo、CNB インスタンスであれば、「設定 → バージョン管理」でアカウントを追加してください。",
       "wrongForge": "{host} は {provider} でした。別のフォージとして扱われていましたが、判定を修正しました。再読み込みしてください。"
     },
     "addAccount": "アカウントを追加",
@@ -6450,6 +6473,29 @@
     "creating": "作成中…",
     "createAnyway": "それでも作成",
     "viewExisting": "既存のタスクを表示",
+    "selectItem": "#{number} を選択",
+    "selectBlockedActive": "このイシューには進行中のタスクがあります",
+    "selectionLabel": "選択したイシュー",
+    "selectionCount": "{count} 件を選択中",
+    "selectionOffPage": "うち {count} 件はこの一覧にありません",
+    "selectionClear": "クリア",
+    "combineAction": "{count} 件をまとめて対応",
+    "combineNeedsTwo": "イシューを 2 件以上選んでください",
+    "combineTitle": "{count} 件のイシューをまとめて対応",
+    "combineDescription": "{repo} のフォルダに ToDo タスクを 1 つ作成します。1 つのエージェントが同じワークツリーでこれらのイシューにまとめて対応し、レビュー後に反映されます。",
+    "combineItemsLabel": "このタスクに含まれるイシュー",
+    "combineRemoveItem": "#{number} を外す",
+    "combineScenarioFixHint": "エージェントは報告を 1 件ずつ判断し、妥当なものだけを 1 つの変更でまとめて修正します。妥当でないものには一切手を付けず、結論を添えてあなたの判断を待ちます。",
+    "combineScenarioPlanFirstHint": "エージェントは報告を 1 件ずつ判断し、妥当なものについて 1 つの計画を出して停止します。計画を承認するにはタスクを差し戻して実装させます。",
+    "combineWritebackLabel": "完了時に各イシューへコメントする",
+    "combineWritebackHint": "タスクが完了すると、これらのイシューそれぞれに 1 件ずつコメントします。結果・リンク・差分の行数です。",
+    "combineTooFew": "まとめて対応するにはイシューが 2 件以上必要です。1 件だけなら、その行から対応してください。",
+    "combineConflictsBody": "これらのイシューの一部は、すでにアクティブなタスクが対応中です：",
+    "combineConflictItem": "#{number} — {title}（{status}）",
+    "combineRemoveConflicts": "これらのイシューを外す",
+    "combineCreated": "{count} 件のイシューに 1 つのタスクを作成しました",
+    "combineViewBoard": "ボードで表示",
+    "combinedWith": "{numbers} とまとめて対応",
     "scenarioLabel": "処理方法",
     "scenarioFix": "修正・実装する",
     "scenarioFixHint": "エージェントはまず報告が妥当かを判断し、妥当なときだけ修正します。妥当でなければ（再現できない、仕様どおり、修正済みなど）コードを一切変えずに早めに終了し、結論を添えてあなたの判断を待ちます。",
